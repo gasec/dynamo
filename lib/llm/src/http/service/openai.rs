@@ -1662,7 +1662,7 @@ async fn responses(
                 })?;
 
         // Convert NvCreateChatCompletionResponse --> NvResponse
-        let response: NvResponse = chat_completion_to_response(response, &response_params)
+        let response: NvResponse = chat_completion_to_response(response, &response_params, responses_ctx.as_ref())
             .map_err(|e| {
                 tracing::error!(
                     request_id,
