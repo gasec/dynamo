@@ -84,6 +84,39 @@ def run_dynamo_headless(config: Config) -> None:
     Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
+    # Propagate worker_cls for custom load formats so headless workers use
+    # the same model loader and patches as the leader node.
+    if config.engine_args.load_format == "gms":
+        config.engine_args.worker_cls = (
+            "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+        )
+    elif config.engine_args.load_format in ("mx-source", "mx-target"):
+        config.engine_args.worker_cls = (
+            "modelexpress.vllm_worker.ModelExpressWorker"
+        )
+
+    # Shadow mode: force PIECEWISE cudagraph mode to match the leader's
+    # override. Without this, the headless worker's backend resolution may
+    # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
+    if os.environ.get("SHADOW_SKIP_KV_CACHE") == "1":
+        import json as _json
+
+        cc = config.engine_args.compilation_config
+        if cc is None:
+            config.engine_args.compilation_config = {"cudagraph_mode": "PIECEWISE"}
+        elif isinstance(cc, dict):
+            cc["cudagraph_mode"] = "PIECEWISE"
+        elif isinstance(cc, str):
+            try:
+                parsed = _json.loads(cc)
+                parsed["cudagraph_mode"] = "PIECEWISE"
+                config.engine_args.compilation_config = _json.dumps(parsed)
+            except _json.JSONDecodeError:
+                pass
+        logger.info(
+            "[Headless Shadow] Forced cudagraph_mode=PIECEWISE to match leader"
+        )
+
     # Keep the upstream CLI import local so tests that only exercise
     # build_headless_namespace() do not pull in vLLM's full CLI import graph.
     from vllm.entrypoints.cli.serve import run_headless
@@ -456,6 +489,58 @@ def setup_vllm_engine(
 
     if engine_args.load_format == "gms":
         engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+
+        # Shadow mode configuration
+        if config.gms_mode == "shadow":
+            os.environ["SHADOW_SKIP_KV_CACHE"] = "1"
+            logger.info(
+                "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
+            )
+
+            # Force PIECEWISE CUDA graph mode (required for shadow engines)
+            # In PIECEWISE mode, attention ops are stubbed during graph capture,
+            # so no KV cache is needed at capture time
+            if engine_args.compilation_config is None:
+                engine_args.compilation_config = {"cudagraph_mode": "PIECEWISE"}
+                logger.info("[Shadow] Set CUDA graph mode to PIECEWISE")
+            elif isinstance(engine_args.compilation_config, dict):
+                if engine_args.compilation_config.get("cudagraph_mode") != "PIECEWISE":
+                    logger.warning(
+                        "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                        "(required for shadow mode)"
+                    )
+                    engine_args.compilation_config["cudagraph_mode"] = "PIECEWISE"
+            elif isinstance(engine_args.compilation_config, str):
+                import json as _json
+
+                try:
+                    cc = _json.loads(engine_args.compilation_config)
+                    if cc.get("cudagraph_mode") != "PIECEWISE":
+                        logger.warning(
+                            "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                            "(required for shadow mode)"
+                        )
+                        cc["cudagraph_mode"] = "PIECEWISE"
+                        engine_args.compilation_config = _json.dumps(cc)
+                except _json.JSONDecodeError:
+                    logger.error(
+                        "[Shadow] Could not parse compilation_config as JSON, "
+                        "shadow mode may not work correctly"
+                    )
+            else:
+                # compilation_config is a CompilationConfig object
+                from vllm.config import CUDAGraphMode
+
+                if hasattr(engine_args.compilation_config, "cudagraph_mode"):
+                    current_mode = engine_args.compilation_config.cudagraph_mode
+                    if current_mode != CUDAGraphMode.PIECEWISE:
+                        logger.warning(
+                            "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                            "(required for shadow mode)"
+                        )
+                        engine_args.compilation_config.cudagraph_mode = (
+                            CUDAGraphMode.PIECEWISE
+                        )
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
@@ -940,14 +1025,49 @@ async def init(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    await register_vllm_model(
-        model_input,
-        model_type,
-        generate_endpoint,
-        config,
-        engine_client,
-        vllm_config,
-    )
+    if config.gms_mode == "shadow":
+        # Shadow mode: lock-driven activation.
+        # Flow: sleep → startup probe passes → block on lock → wake → register → serve.
+        # The engine is NOT registered with discovery until after the lock is acquired
+        # and the wake completes, so the frontend never sees a sleeping shadow.
+
+        await handler.sleep_engine(level=1)
+
+        # Flip the system health status so the startup/liveness probes pass.
+        # Branch 3 of SystemHealth.get_health_status() returns this value when
+        # no endpoint health targets are registered yet.
+        runtime.set_health_status(True)
+        logger.info("[Shadow] Engine sleeping, startup probe now passing, waiting for lock")
+
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        lock = FlockFailoverLock(lock_path)
+        await lock.acquire(engine_id=f"engine-{engine_id}")
+        logger.info("[Shadow] Lock acquired, waking engine")
+
+        await handler.wake_engine()
+        logger.info("[Shadow] Engine awake, registering with discovery")
+
+        await register_vllm_model(
+            model_input,
+            model_type,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+        )
+    else:
+        # Normal mode: register immediately and serve.
+        await register_vllm_model(
+            model_input,
+            model_type,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+        )
 
     health_check_payload = VllmHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
