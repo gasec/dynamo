@@ -9,7 +9,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
-use crate::protocols::{compute_block_hash_for_seq, compute_seq_hash_for_block};
+use crate::protocols::{LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -202,6 +202,7 @@ impl KvRouterConfig {
         block_size: u32,
         config_override: Option<&RouterConfigOverride>,
         lora_name: Option<&str>,
+        precomputed_block_hashes: Option<&[LocalBlockHash]>,
     ) -> Option<Vec<u64>> {
         if !self.router_track_active_blocks {
             return None;
@@ -217,8 +218,14 @@ impl KvRouterConfig {
             .unwrap_or(self.router_assume_kv_reuse);
 
         if assume_kv_reuse {
-            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
-            Some(compute_seq_hash_for_block(&block_hashes))
+            let block_hashes = match precomputed_block_hashes {
+                Some(block_hashes) => block_hashes,
+                None => {
+                    let computed = compute_block_hash_for_seq(tokens, block_size, None, lora_name);
+                    return Some(compute_seq_hash_for_block(&computed));
+                }
+            };
+            Some(compute_seq_hash_for_block(block_hashes))
         } else {
             let mut rng = rand::rng();
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
@@ -235,5 +242,22 @@ impl KvRouterConfig {
     /// avoiding the need to query workers for their local indexer state.
     pub fn should_subscribe_to_kv_events(&self) -> bool {
         self.use_kv_events && self.overlap_score_weight > 0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_seq_hashes_for_tracking_uses_precomputed_block_hashes() {
+        let config = KvRouterConfig::default();
+        let tokens: Vec<u32> = (0..8).collect();
+        let precomputed = vec![LocalBlockHash(11), LocalBlockHash(29)];
+
+        let seq_hashes =
+            config.compute_seq_hashes_for_tracking(&tokens, 4, None, None, Some(&precomputed));
+
+        assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
     }
 }

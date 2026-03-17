@@ -427,6 +427,16 @@ impl KvRouter {
                 lora_name.as_deref(),
             )
         });
+        // Compute seq_hashes only if scheduler needs it for active blocks tracking
+        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
+            self.kv_router_config.compute_seq_hashes_for_tracking(
+                tokens,
+                self.block_size,
+                router_config_override,
+                lora_name.as_deref(),
+                Some(&block_hashes),
+            )
+        });
         let hash_elapsed = start.elapsed();
 
         let overlap_scores = self
@@ -436,15 +446,6 @@ impl KvRouter {
             .await?;
         let find_matches_elapsed = start.elapsed();
 
-        // Compute seq_hashes only if scheduler needs it for active blocks tracking
-        let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
-            self.kv_router_config.compute_seq_hashes_for_tracking(
-                tokens,
-                self.block_size,
-                router_config_override,
-                lora_name.as_deref(),
-            )
-        });
         let seq_hash_elapsed = start.elapsed();
 
         let response = self
@@ -511,6 +512,7 @@ impl KvRouter {
             self.block_size,
             router_config_override,
             lora_name.as_deref(),
+            None,
         );
 
         if let Err(e) = self
@@ -583,14 +585,16 @@ impl KvRouter {
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None, lora_name);
-        let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
             tokens,
             self.block_size,
             router_config_override,
             lora_name,
+            Some(&block_hashes),
         );
+
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         Ok(self
             .scheduler
