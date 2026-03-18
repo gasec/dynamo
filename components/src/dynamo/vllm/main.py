@@ -78,30 +78,6 @@ def build_headless_namespace(config: Config) -> argparse.Namespace:
     return ns
 
 
-def _force_piecewise_cudagraph_mode(engine_args) -> None:
-    """Ensure compilation_config uses PIECEWISE cudagraph mode for shadow mode.
-
-    In PIECEWISE mode, attention ops are stubbed during graph capture so no KV
-    cache is needed at capture time. Raises if the user explicitly set a
-    conflicting mode.
-    """
-    from vllm.config import CompilationConfig, CUDAGraphMode
-
-    cc = engine_args.compilation_config
-    assert isinstance(cc, CompilationConfig), (
-        f"Expected CompilationConfig, got {type(cc).__name__}. "
-        f"vLLM's arg parsing may have changed."
-    )
-    if cc.cudagraph_mode is None:
-        cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
-    elif cc.cudagraph_mode != CUDAGraphMode.PIECEWISE:
-        raise ValueError(
-            f"Shadow mode requires PIECEWISE cudagraph mode, "
-            f"got {cc.cudagraph_mode.name}"
-        )
-    logger.info("[Shadow] cudagraph_mode set to PIECEWISE")
-
-
 def run_dynamo_headless(config: Config) -> None:
     """Run in headless mode for multi-node TP/PP.
 
@@ -119,8 +95,12 @@ def run_dynamo_headless(config: Config) -> None:
         # override. Without this, the headless worker's backend resolution may
         # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
         if config.gms_shadow_mode:
+            from gpu_memory_service.integrations.vllm.patches import (
+                force_piecewise_cudagraph_mode,
+            )
+
             os.environ["DYN_GMS_SHADOW_MODE"] = "1"
-            _force_piecewise_cudagraph_mode(config.engine_args)
+            force_piecewise_cudagraph_mode(config.engine_args)
 
     elif config.engine_args.load_format in ("mx-source", "mx-target"):
         config.engine_args.worker_cls = (
@@ -502,11 +482,15 @@ def setup_vllm_engine(
 
         # Shadow mode configuration
         if config.gms_shadow_mode:
+            from gpu_memory_service.integrations.vllm.patches import (
+                force_piecewise_cudagraph_mode,
+            )
+
             os.environ["DYN_GMS_SHADOW_MODE"] = "1"
             logger.info(
                 "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
             )
-            _force_piecewise_cudagraph_mode(engine_args)
+            force_piecewise_cudagraph_mode(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
