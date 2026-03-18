@@ -14,11 +14,12 @@ def is_shadow_mode() -> bool:
     return os.environ.get("DYN_GMS_SHADOW_MODE", "0") == "1"
 
 
-def force_piecewise_cudagraph_mode(engine_args) -> None:
-    """Ensure PIECEWISE cudagraph mode for shadow engines.
+def validate_cudagraph_mode(engine_args) -> None:
+    """Validate and set cudagraph mode for shadow engines.
 
-    Shadow mode stubs attention during graph capture so no KV cache is
-    needed. Raises if the user explicitly set a conflicting mode.
+    Defaults unset mode to PIECEWISE (attention stubbed during graph capture).
+    Accepts NONE (e.g. enforce_eager). Rejects FULL variants which need
+    KV cache tensors that don't exist during shadow init.
     """
     from vllm.config import CompilationConfig, CUDAGraphMode
 
@@ -29,9 +30,12 @@ def force_piecewise_cudagraph_mode(engine_args) -> None:
     )
     if cc.cudagraph_mode is None:
         cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
-    elif cc.cudagraph_mode != CUDAGraphMode.PIECEWISE:
+        logger.info("[Shadow] cudagraph_mode defaulted to PIECEWISE")
+    elif cc.cudagraph_mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
+        pass  # compatible
+    else:
         raise ValueError(
-            f"Shadow mode requires PIECEWISE cudagraph mode, "
-            f"got {cc.cudagraph_mode.name}"
+            f"Shadow mode requires PIECEWISE or NONE cudagraph mode, "
+            f"got {cc.cudagraph_mode.name}. FULL modes capture attention ops "
+            f"that need KV cache tensors, which don't exist during shadow init."
         )
-    logger.info("[Shadow] cudagraph_mode set to PIECEWISE")

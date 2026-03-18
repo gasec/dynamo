@@ -96,11 +96,11 @@ def run_dynamo_headless(config: Config) -> None:
         # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
-                force_piecewise_cudagraph_mode,
+                validate_cudagraph_mode,
             )
 
             os.environ["DYN_GMS_SHADOW_MODE"] = "1"
-            force_piecewise_cudagraph_mode(config.engine_args)
+            validate_cudagraph_mode(config.engine_args)
 
     elif config.engine_args.load_format in ("mx-source", "mx-target"):
         config.engine_args.worker_cls = (
@@ -483,14 +483,14 @@ def setup_vllm_engine(
         # Shadow mode configuration
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
-                force_piecewise_cudagraph_mode,
+                validate_cudagraph_mode,
             )
 
             os.environ["DYN_GMS_SHADOW_MODE"] = "1"
             logger.info(
                 "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
             )
-            force_piecewise_cudagraph_mode(engine_args)
+            validate_cudagraph_mode(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:

@@ -136,17 +136,10 @@ def cross_validate_config(
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 
-    # Validate --gms-shadow-mode is incompatible with --enforce-eager
-    if dynamo_config.gms_shadow_mode and getattr(
-        engine_config, "enforce_eager", False
-    ):
-        raise ValueError(
-            "--gms-shadow-mode is incompatible with --enforce-eager. "
-            "Shadow mode requires PIECEWISE CUDA graph mode so that attention ops "
-            "are stubbed during warm-up (no KV cache exists at init time). "
-            "--enforce-eager forces CUDA graph mode to NONE, which runs real "
-            "attention ops that need KV cache tensors."
-        )
+    # enforce_eager is compatible with shadow mode: vLLM overrides
+    # cudagraph_mode to NONE, which skips graph capture entirely.
+    # The _get_slot_mappings patch returns (None, None) for empty KV caches,
+    # and profile_run/warmup paths handle this gracefully.
 
 
 def update_dynamo_config_with_engine(
