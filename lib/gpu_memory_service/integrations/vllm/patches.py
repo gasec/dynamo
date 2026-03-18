@@ -120,9 +120,6 @@ def patch_request_memory() -> None:
     vLLM's request_memory() checks that free_memory >= requested_memory at
     startup. This fails for shadow engines because the primary engine is
     consuming GPU memory for its KV cache.
-
-    Note: This patch checks DYN_GMS_SHADOW_MODE env var (not _shadow_init_phase)
-    because it runs before model_runner exists.
     """
     global _request_memory_patched
 
@@ -192,35 +189,28 @@ def patch_determine_available_memory() -> None:
         # use the standard memory profiling path because the other engine's
         # allocations make free_memory tiny/negative and trigger assertions.
         #
-        # Strategy: run profile_run() for compilation, measure activation
-        # peak ourselves, then compute available memory from total GPU
-        # capacity (what will be available when the shadow wakes alone).
+        # Strategy: run profile_run() for compilation, measure the peak,
+        # then compute available memory from total GPU capacity (what will
+        # be available when the shadow wakes alone).
 
-        # Run profile for compilation
+        # max_memory_allocated() returns the high-water mark of GPU memory
+        # managed by PyTorch's caching allocator (in bytes) since the last
+        # reset_peak_memory_stats() call. This includes all live tensors
+        # (weights, activations, buffers) but excludes non-PyTorch allocations
+        # (CUDA contexts, cuBLAS workspaces, NCCL buffers).
         torch.cuda.reset_peak_memory_stats()
         self.model_runner.profile_run()
         torch.cuda.synchronize()
+        non_kv_cache_memory = torch.cuda.max_memory_allocated()
 
-        # Measure peak activation from this process only (PyTorch-tracked)
-        peak_bytes = torch.cuda.max_memory_allocated()
-        model_bytes = int(self.model_runner.model_memory_usage)
-        activation_bytes = max(0, peak_bytes - model_bytes)
-
-        # Compute projected available memory as if we had the full GPU
-        total_memory = self.init_snapshot.total_memory
-        requested_memory = self.requested_memory
-        non_kv_cache_memory = model_bytes + activation_bytes
-
-        projected_available = requested_memory - non_kv_cache_memory
+        projected_available = self.requested_memory - non_kv_cache_memory
 
         logger.info(
             "[GMS Patch] Shadow mode: projected available memory "
-            "%.2f GiB (requested=%.2f GiB, weights=%.2f GiB, "
-            "activations=%.2f GiB)",
+            "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB)",
             projected_available / (1 << 30),
-            requested_memory / (1 << 30),
-            model_bytes / (1 << 30),
-            activation_bytes / (1 << 30),
+            self.requested_memory / (1 << 30),
+            non_kv_cache_memory / (1 << 30),
         )
 
         return int(projected_available)
@@ -306,20 +296,17 @@ def patch_initialize_kv_cache_tensors() -> None:
 
 
 def patch_get_slot_mappings() -> None:
-    """Patch GPUModelRunner._get_slot_mappings to return None when KV caches are empty.
+    """Patch GPUModelRunner._get_slot_mappings to return (None, None) when KV caches are empty.
 
-    In vLLM v0.15.x, _get_slot_mappings computes slot mappings that are passed
-    to the unified_kv_cache_update splitting op via ForwardContext. When KV cache
-    tensors haven't been allocated (shadow init), the op tries to unbind an empty
-    KV cache tensor and crashes.
+    Slot mappings translate logical token positions to physical KV cache addresses.
+    _dummy_run() (used for CUDA graph capture/warmup) calls _get_slot_mappings()
+    unconditionally — even in PIECEWISE mode where attention ops are excluded from
+    the captured graph. Normally harmless since the KV cache exists, but in shadow
+    mode there are no KV cache tensors or block tables to index into.
 
-    By returning (None, None) when self.kv_caches is empty, set_forward_context
-    defaults slot_mapping to {}, and unified_kv_cache_update gracefully skips
-    the KV write (it checks `slot_mapping.get(layer_name) is not None`).
-
-    This allows compile_or_warm_up_model to run during shadow init, capturing
-    CUDA graphs without KV caches. The graphs only contain MLP/norm regions
-    (PIECEWISE mode), so they remain valid after KV caches are allocated on wake.
+    Returning (None, None) causes set_forward_context to default slot_mapping to {},
+    which makes KV write ops gracefully no-op (they check slot_mapping.get(layer_name)
+    is not None before writing).
     """
     global _get_slot_mappings_patched
 
