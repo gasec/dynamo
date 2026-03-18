@@ -123,6 +123,25 @@ class GMSWorker(Worker):
         except Exception as e:
             logger.debug("[GMS] Could not correct memory accounting: %s", e)
 
+    def initialize_from_config(self, kv_cache_config) -> None:
+        """Initialize from config with post-hoc cudagraph mode assertion.
+
+        vLLM mutates cudagraph_mode in multiple places after our
+        _force_piecewise_cudagraph_mode runs (CompilationConfig.__post_init__,
+        VllmConfig.__post_init__, GPUModelRunner._check_and_update_cudagraph_mode).
+        This asserts the final resolved mode is still PIECEWISE or NONE.
+        """
+        super().initialize_from_config(kv_cache_config)
+        if is_shadow_mode():
+            from vllm.config import CUDAGraphMode
+
+            mode = self.model_runner.compilation_config.cudagraph_mode
+            if mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
+                raise RuntimeError(
+                    f"Shadow mode requires PIECEWISE cudagraph mode after resolution, "
+                    f"but got {mode.name}. vLLM's config resolution overrode it."
+                )
+
     def sleep(self, level: int = 1) -> None:
         """
         vLLM sleep implementation with GMS integration.

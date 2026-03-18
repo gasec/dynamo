@@ -392,12 +392,8 @@ class BaseWorkerHandler(ABC):
                         "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
                     )
 
-                # Step 2: Abort in-flight requests and wait for them to drain so the
-                # GPU is fully quiesced before unmapping memory.
-                await self.engine_client.pause_generation()
-
-                # Step 3: Now safe to sleep - no in-flight GPU work
-                await self.engine_client.sleep(level)
+                # Step 2: Drain in-flight requests and sleep GPU
+                await self.sleep_engine(level)
                 self._engine_is_sleeping = True
 
                 return {
@@ -423,11 +419,10 @@ class BaseWorkerHandler(ABC):
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
-                # Step 1: Wake engine first - must be ready before accepting requests
-                await self.engine_client.wake_up()
+                # Step 1: Wake engine (remap weights, allocate KV, resume scheduler)
+                await self.wake_engine()
 
-                # Step 2: Resume generation and re-register.
-                await self.engine_client.resume_generation()
+                # Step 2: Re-register with discovery
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
