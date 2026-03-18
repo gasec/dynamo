@@ -30,9 +30,9 @@ from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
 from gpu_memory_service.integrations.vllm.patches import (
     apply_shadow_mode_patches,
-    is_shadow_mode,
     patch_memory_snapshot,
 )
+from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
 
 logger = logging.getLogger(__name__)
 

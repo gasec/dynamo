@@ -1,65 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GMS vLLM patches and shadow mode utilities.
+"""GMS vLLM patches.
 
-Patches are applied at GMSWorker import time. Shadow mode behaviour is gated
-by the DYN_GMS_SHADOW_MODE env var and the model_runner._shadow_init_phase flag.
+Core patches are always applied. Shadow mode patches are gated by
+is_shadow_mode() in apply_shadow_mode_patches().
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import time
 
 import torch
 
 from gpu_memory_service import get_gms_client_memory_manager
 from gpu_memory_service.common.types import GrantedLockType
+from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
 
 logger = logging.getLogger(__name__)
 
-# Patch state tracking (to prevent double-patching)
 _memory_snapshot_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
 _initialize_kv_cache_tensors_patched = False
 _get_slot_mappings_patched = False
 _allocate_kv_cache_on_wake_added = False
-
-
-# =============================================================================
-# Shadow mode utilities
-# =============================================================================
-
-
-def is_shadow_mode() -> bool:
-    """True when DYN_GMS_SHADOW_MODE=1 (set by main.py at startup)."""
-    return os.environ.get("DYN_GMS_SHADOW_MODE", "0") == "1"
-
-
-def force_piecewise_cudagraph_mode(engine_args) -> None:
-    """Ensure PIECEWISE cudagraph mode for shadow engines.
-
-    Shadow mode stubs attention during graph capture so no KV cache is
-    needed. Raises if the user explicitly set a conflicting mode.
-    """
-    from vllm.config import CompilationConfig, CUDAGraphMode
-
-    cc = engine_args.compilation_config
-    assert isinstance(cc, CompilationConfig), (
-        f"Expected CompilationConfig, got {type(cc).__name__}. "
-        f"vLLM's arg parsing may have changed."
-    )
-    if cc.cudagraph_mode is None:
-        cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
-    elif cc.cudagraph_mode != CUDAGraphMode.PIECEWISE:
-        raise ValueError(
-            f"Shadow mode requires PIECEWISE cudagraph mode, "
-            f"got {cc.cudagraph_mode.name}"
-        )
-    logger.info("[Shadow] cudagraph_mode set to PIECEWISE")
 
 
 # =============================================================================
@@ -112,7 +78,7 @@ def patch_memory_snapshot() -> None:
 
 
 # =============================================================================
-# Shadow mode patches
+# Shadow mode patches (only applied when is_shadow_mode() is True)
 # =============================================================================
 
 
@@ -132,30 +98,24 @@ def patch_request_memory() -> None:
     original_request_memory = worker_utils.request_memory
 
     def patched_request_memory(init_snapshot, cache_config):
-        if is_shadow_mode():
-            requested_memory = int(
-                init_snapshot.total_memory * cache_config.gpu_memory_utilization
-            )
-            logger.info(
-                "[GMS Patch] Shadow mode: bypassing memory check "
-                "(requested=%.2f GiB, free=%.2f GiB)",
-                requested_memory / (1 << 30),
-                init_snapshot.free_memory / (1 << 30),
-            )
-            return requested_memory
-
-        return original_request_memory(init_snapshot, cache_config)
+        requested_memory = int(
+            init_snapshot.total_memory * cache_config.gpu_memory_utilization
+        )
+        logger.info(
+            "[GMS Patch] Shadow mode: bypassing memory check "
+            "(requested=%.2f GiB, free=%.2f GiB)",
+            requested_memory / (1 << 30),
+            init_snapshot.free_memory / (1 << 30),
+        )
+        return requested_memory
 
     worker_utils.request_memory = patched_request_memory
     _request_memory_patched = True
-    logger.info("[GMS Patch] Patched request_memory for shadow mode support")
+    logger.info("[GMS Patch] Patched request_memory for shadow mode")
 
 
 def patch_determine_available_memory() -> None:
     """Project available memory from total GPU capacity (shadow shares GPU)."""
-    if not is_shadow_mode():
-        return
-
     try:
         from vllm.v1.worker.gpu_worker import Worker
     except ImportError:
@@ -185,9 +145,7 @@ def patch_determine_available_memory() -> None:
         return int(projected_available)
 
     Worker.determine_available_memory = patched_determine_available_memory
-    logger.info(
-        "[GMS Patch] Patched determine_available_memory for shadow mode"
-    )
+    logger.info("[GMS Patch] Patched determine_available_memory for shadow mode")
 
 
 def patch_register_kv_caches() -> None:
@@ -376,9 +334,6 @@ def patch_allocate_kv_cache_on_wake() -> None:
 
 def patch_cudagraph_mode_escalation() -> None:
     """Clamp cudagraph_mode to PIECEWISE if vLLM escalates to FULL_AND_PIECEWISE."""
-    if not is_shadow_mode():
-        return
-
     try:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     except ImportError:
@@ -392,15 +347,14 @@ def patch_cudagraph_mode_escalation() -> None:
     original_init_keys = CudagraphDispatcher.initialize_cudagraph_keys
 
     def patched_initialize_cudagraph_keys(self, cudagraph_mode, *args, **kwargs):
-        if is_shadow_mode():
-            from vllm.config import CUDAGraphMode
+        from vllm.config import CUDAGraphMode
 
-            if cudagraph_mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
-                logger.info(
-                    "[Shadow] Clamping cudagraph_mode from %s to PIECEWISE",
-                    cudagraph_mode.name,
-                )
-                cudagraph_mode = CUDAGraphMode.PIECEWISE
+        if cudagraph_mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
+            logger.info(
+                "[Shadow] Clamping cudagraph_mode from %s to PIECEWISE",
+                cudagraph_mode.name,
+            )
+            cudagraph_mode = CUDAGraphMode.PIECEWISE
         return original_init_keys(self, cudagraph_mode, *args, **kwargs)
 
     CudagraphDispatcher.initialize_cudagraph_keys = patched_initialize_cudagraph_keys
@@ -414,7 +368,10 @@ def patch_cudagraph_mode_escalation() -> None:
 
 
 def apply_shadow_mode_patches() -> None:
-    """Apply all shadow mode patches (safe for non-shadow engines)."""
+    """Apply all shadow mode patches. No-ops if not in shadow mode."""
+    if not is_shadow_mode():
+        return
+
     patch_request_memory()
     patch_determine_available_memory()
     patch_register_kv_caches()

@@ -95,7 +95,7 @@ def run_dynamo_headless(config: Config) -> None:
         # override. Without this, the headless worker's backend resolution may
         # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
         if config.gms_shadow_mode:
-            from gpu_memory_service.integrations.vllm.patches import (
+            from gpu_memory_service.integrations.vllm.utils import (
                 force_piecewise_cudagraph_mode,
             )
 
@@ -482,7 +482,7 @@ def setup_vllm_engine(
 
         # Shadow mode configuration
         if config.gms_shadow_mode:
-            from gpu_memory_service.integrations.vllm.patches import (
+            from gpu_memory_service.integrations.vllm.utils import (
                 force_piecewise_cudagraph_mode,
             )
 
