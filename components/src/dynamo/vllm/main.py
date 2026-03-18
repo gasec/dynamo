@@ -78,6 +78,30 @@ def build_headless_namespace(config: Config) -> argparse.Namespace:
     return ns
 
 
+def _force_piecewise_cudagraph_mode(engine_args) -> None:
+    """Ensure compilation_config uses PIECEWISE cudagraph mode for shadow mode.
+
+    In PIECEWISE mode, attention ops are stubbed during graph capture so no KV
+    cache is needed at capture time. Raises if the user explicitly set a
+    conflicting mode.
+    """
+    from vllm.config import CompilationConfig, CUDAGraphMode
+
+    cc = engine_args.compilation_config
+    assert isinstance(cc, CompilationConfig), (
+        f"Expected CompilationConfig, got {type(cc).__name__}. "
+        f"vLLM's arg parsing may have changed."
+    )
+    if cc.cudagraph_mode is None:
+        cc.cudagraph_mode = CUDAGraphMode.PIECEWISE
+    elif cc.cudagraph_mode != CUDAGraphMode.PIECEWISE:
+        raise ValueError(
+            f"Shadow mode requires PIECEWISE cudagraph mode, "
+            f"got {cc.cudagraph_mode.name}"
+        )
+    logger.info("[Shadow] cudagraph_mode set to PIECEWISE")
+
+
 def run_dynamo_headless(config: Config) -> None:
     """Run in headless mode for multi-node TP/PP.
 
@@ -90,31 +114,17 @@ def run_dynamo_headless(config: Config) -> None:
         config.engine_args.worker_cls = (
             "gpu_memory_service.integrations.vllm.worker.GMSWorker"
         )
+
+        # Shadow mode: force PIECEWISE cudagraph mode to match the leader's
+        # override. Without this, the headless worker's backend resolution may
+        # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
+        if config.gms_shadow_mode:
+            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            _force_piecewise_cudagraph_mode(config.engine_args)
+
     elif config.engine_args.load_format in ("mx-source", "mx-target"):
         config.engine_args.worker_cls = (
             "modelexpress.vllm_worker.ModelExpressWorker"
-        )
-
-    # Shadow mode: force PIECEWISE cudagraph mode to match the leader's
-    # override. Without this, the headless worker's backend resolution may
-    # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
-    if os.environ.get("DYN_GMS_SHADOW_MODE") == "1":
-        import json as _json
-
-        cc = config.engine_args.compilation_config
-        if cc is None:
-            config.engine_args.compilation_config = {"cudagraph_mode": "PIECEWISE"}
-        elif isinstance(cc, dict):
-            cc["cudagraph_mode"] = "PIECEWISE"
-        elif isinstance(cc, str):
-            try:
-                parsed = _json.loads(cc)
-                parsed["cudagraph_mode"] = "PIECEWISE"
-                config.engine_args.compilation_config = _json.dumps(parsed)
-            except _json.JSONDecodeError:
-                pass
-        logger.info(
-            "[Headless Shadow] Forced cudagraph_mode=PIECEWISE to match leader"
         )
 
     # Keep the upstream CLI import local so tests that only exercise
@@ -496,51 +506,7 @@ def setup_vllm_engine(
             logger.info(
                 "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
             )
-
-            # Force PIECEWISE CUDA graph mode (required for shadow engines)
-            # In PIECEWISE mode, attention ops are stubbed during graph capture,
-            # so no KV cache is needed at capture time
-            if engine_args.compilation_config is None:
-                engine_args.compilation_config = {"cudagraph_mode": "PIECEWISE"}
-                logger.info("[Shadow] Set CUDA graph mode to PIECEWISE")
-            elif isinstance(engine_args.compilation_config, dict):
-                if engine_args.compilation_config.get("cudagraph_mode") != "PIECEWISE":
-                    logger.warning(
-                        "[Shadow] Overriding cudagraph_mode to PIECEWISE "
-                        "(required for shadow mode)"
-                    )
-                    engine_args.compilation_config["cudagraph_mode"] = "PIECEWISE"
-            elif isinstance(engine_args.compilation_config, str):
-                import json as _json
-
-                try:
-                    cc = _json.loads(engine_args.compilation_config)
-                    if cc.get("cudagraph_mode") != "PIECEWISE":
-                        logger.warning(
-                            "[Shadow] Overriding cudagraph_mode to PIECEWISE "
-                            "(required for shadow mode)"
-                        )
-                        cc["cudagraph_mode"] = "PIECEWISE"
-                        engine_args.compilation_config = _json.dumps(cc)
-                except _json.JSONDecodeError:
-                    logger.error(
-                        "[Shadow] Could not parse compilation_config as JSON, "
-                        "shadow mode may not work correctly"
-                    )
-            else:
-                # compilation_config is a CompilationConfig object
-                from vllm.config import CUDAGraphMode
-
-                if hasattr(engine_args.compilation_config, "cudagraph_mode"):
-                    current_mode = engine_args.compilation_config.cudagraph_mode
-                    if current_mode != CUDAGraphMode.PIECEWISE:
-                        logger.warning(
-                            "[Shadow] Overriding cudagraph_mode to PIECEWISE "
-                            "(required for shadow mode)"
-                        )
-                        engine_args.compilation_config.cudagraph_mode = (
-                            CUDAGraphMode.PIECEWISE
-                        )
+            _force_piecewise_cudagraph_mode(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:

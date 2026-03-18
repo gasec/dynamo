@@ -128,7 +128,7 @@ start_engine_worker() {
     echo "Starting $label worker (headless, node-rank 1)..."
     setsid \
     env CUDA_VISIBLE_DEVICES=1 \
-    DYN_GMS_SHADOW_MODE=1 \
+    DYN_VLLM_GMS_SHADOW_MODE=true \
     python3 -m dynamo.vllm \
         --model "$MODEL_NAME" \
         --tensor-parallel-size 2 \
