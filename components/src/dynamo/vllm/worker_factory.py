@@ -531,8 +531,6 @@ class WorkerFactory:
         if config.gms_shadow_mode:
             # Shadow mode: lock-driven activation.
             # Flow: sleep → startup probe passes → block on lock → wake → register.
-            # The engine is NOT registered with discovery until after the lock is
-            # acquired and the wake completes, so the frontend never sees a sleeping shadow.
             await handler.sleep_engine(level=1)
 
             runtime.set_health_status(True)
@@ -550,6 +548,7 @@ class WorkerFactory:
 
             await handler.wake_engine()
             logger.info("[Shadow] Engine awake, registering with discovery")
+
 
         await self.register_vllm_model(
             model_input,
