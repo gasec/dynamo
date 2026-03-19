@@ -28,7 +28,8 @@ set -e
 MODEL_NAME="${1:-Qwen/Qwen3-0.6B}"
 TP_SIZE=2
 
-WORKTREE_ROOT="${WORKTREE_ROOT:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKTREE_ROOT="${WORKTREE_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 cd "$WORKTREE_ROOT"
 
 VENV_NAME="${VENV_NAME:-dynamo}"

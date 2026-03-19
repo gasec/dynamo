@@ -83,13 +83,16 @@ def run_dynamo_headless(config: Config) -> None:
     # Propagate worker_cls for custom load formats so headless workers use
     # the same model loader and patches as the leader node.
     if config.engine_args.load_format == "gms":
+        from gpu_memory_service.integrations.vllm.utils import (
+            configure_gms_lock_mode,
+        )
+
         config.engine_args.worker_cls = (
             "gpu_memory_service.integrations.vllm.worker.GMSWorker"
         )
+        configure_gms_lock_mode(config.engine_args)
 
-        # Shadow mode: force PIECEWISE cudagraph mode to match the leader's
-        # override. Without this, the headless worker's backend resolution may
-        # escalate to FULL_AND_PIECEWISE, causing NCCL collective mismatches.
+        # Validate cudagraph modes specified can work without kv cache allocation
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 validate_cudagraph_mode,
@@ -451,9 +454,14 @@ def setup_vllm_engine(
             os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
 
     if engine_args.load_format == "gms":
-        engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+        from gpu_memory_service.integrations.vllm.utils import (
+            configure_gms_lock_mode,
+        )
 
-        # Shadow mode configuration
+        engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+        configure_gms_lock_mode(engine_args)
+
+        # Optionally enable shadow mode
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 validate_cudagraph_mode,

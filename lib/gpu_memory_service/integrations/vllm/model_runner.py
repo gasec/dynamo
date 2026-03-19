@@ -3,8 +3,9 @@
 
 """GMS model runner subclass for shadow mode.
 
-Replaces monkey-patches with clean method overrides. Injected via
-__class__ swap in GMSWorker.init_device().
+Allows for kv cache to be skipped for a shadow engine init.
+During failover scenarios, multiple engines will be running on the same device.
+They should only allocate on their cache when they are the active/leader engine.
 """
 
 from __future__ import annotations
@@ -15,20 +16,38 @@ import time
 import torch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
-
 logger = logging.getLogger(__name__)
 
 
-class GMSModelRunner(GPUModelRunner):
-    """GPUModelRunner with shadow mode overrides.
+class GMSShadowModelRunner(GPUModelRunner):
+    """GPUModelRunner subclass for shadow mode overrides.
 
-    No __init__ or __slots__ — safe for __class__ swap.
+    Injected via __class__ swap in GMSWorker.init_device(). We use __class__
+    swap rather than wrapping because vLLM's Worker creates the model runner
+    internally and stores references to it. A wrapper would break isinstance
+    checks and leave stale references pointing at the original object. The
+    swap preserves object identity so all existing references see the new
+    methods immediately.
     """
+
+    @property
+    def in_shadow_init(self) -> bool:
+        """True while shadow engine is in init phase (KV cache skipped)."""
+        return getattr(self, "_shadow_init_phase", False)
+
+    def enter_shadow_init(self) -> None:
+        """Enter shadow init phase — KV cache allocation will be skipped."""
+        self._shadow_init_phase = True
+        logger.info("[Shadow] Entered shadow init phase")
+
+    def exit_shadow_init(self) -> None:
+        """Exit shadow init phase — KV cache allocation will proceed normally."""
+        self._shadow_init_phase = False
+        logger.info("[Shadow] Exited shadow init phase")
 
     def initialize_kv_cache_tensors(self, kv_cache_config, kernel_block_sizes):
         """No-op during shadow init; store config for later allocation on wake."""
-        if getattr(self, "_shadow_init_phase", False):
+        if self.in_shadow_init:
             self._shadow_kv_cache_config = kv_cache_config
             self._shadow_kernel_block_sizes = kernel_block_sizes
             logger.info(
@@ -41,52 +60,47 @@ class GMSModelRunner(GPUModelRunner):
         """Return (None, None) when KV caches are empty.
 
         _dummy_run() calls this unconditionally during warmup. Without KV
-        tensors there is nothing to index into; (None, None) makes KV write
-        ops gracefully no-op.
+        tensors there is nothing to index into. This coerces a graceful no-op.
         """
         if not self.kv_caches:
             return None, None
         return super()._get_slot_mappings(*args, **kwargs)
 
     def _check_and_update_cudagraph_mode(self, attention_backends, kv_cache_groups):
-        """In shadow mode, force PIECEWISE and skip backend resolution.
+        """Force PIECEWISE (or keep NONE for enforce_eager) and skip backend resolution.
 
-        vLLM's default resolution may escalate to FULL_AND_PIECEWISE which
-        needs KV cache tensors for graph capture.
+        vLLM's default resolution may escalate to FULL_AND_PIECEWISE. We
+        intercept to clamp back to a shadow-compatible mode.
         """
-        if is_shadow_mode():
-            from vllm.config import CUDAGraphMode
+        from vllm.config import CUDAGraphMode
 
-            mode = self.compilation_config.cudagraph_mode
-            if mode == CUDAGraphMode.NONE:
-                # enforce_eager — keep NONE, just init keys
-                self.cudagraph_dispatcher.initialize_cudagraph_keys(
-                    CUDAGraphMode.NONE, self.uniform_decode_query_len
-                )
-            else:
-                # Default shadow path — force PIECEWISE
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                self.cudagraph_dispatcher.initialize_cudagraph_keys(
-                    CUDAGraphMode.PIECEWISE, self.uniform_decode_query_len
-                )
-            return
-        return super()._check_and_update_cudagraph_mode(
-            attention_backends, kv_cache_groups
-        )
+        mode = self.compilation_config.cudagraph_mode
+        if mode == CUDAGraphMode.NONE:
+            # enforce_eager — keep NONE, just init keys
+            self.cudagraph_dispatcher.initialize_cudagraph_keys(
+                CUDAGraphMode.NONE, self.uniform_decode_query_len
+            )
+        else:
+            # Default shadow path — force PIECEWISE
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            self.cudagraph_dispatcher.initialize_cudagraph_keys(
+                CUDAGraphMode.PIECEWISE, self.uniform_decode_query_len
+            )
 
     def allocate_kv_cache_on_wake(self) -> dict:
         """Allocate KV cache on wake using config stored during shadow init.
 
-        Called by GMSWorker.wake_up() after _shadow_init_phase is cleared.
+        Called by GMSWorker.wake_up() after shadow init phase is exited.
         Waits up to 60s for GPU memory to be freed.
         """
         assert hasattr(self, "_shadow_kv_cache_config"), (
-            "_shadow_kv_cache_config not set"
+            "_shadow_kv_cache_config not set — was enter_shadow_init() called?"
         )
         assert hasattr(self, "_shadow_kernel_block_sizes"), (
-            "_shadow_kernel_block_sizes not set"
+            "_shadow_kernel_block_sizes not set — was enter_shadow_init() called?"
         )
 
+        # OOM remediation during failover: wait for the dying engine to release memory.
         config = self._shadow_kv_cache_config
         kv_cache_bytes = sum(t.size for t in config.kv_cache_tensors)
 
@@ -98,6 +112,7 @@ class GMSModelRunner(GPUModelRunner):
                 free_bytes / (1 << 30),
             )
             deadline = time.monotonic() + 60.0
+            last_log = time.monotonic()
             while free_bytes < kv_cache_bytes:
                 if time.monotonic() > deadline:
                     raise RuntimeError(
@@ -105,6 +120,20 @@ class GMSModelRunner(GPUModelRunner):
                         f"need {kv_cache_bytes / (1 << 30):.2f} GiB, "
                         f"free {free_bytes / (1 << 30):.2f} GiB"
                     )
+                now = time.monotonic()
+                if now - last_log >= 5.0:
+                    elapsed = now - (deadline - 60.0)
+                    remaining = deadline - now
+                    logger.info(
+                        "[Shadow] Still waiting for GPU memory: "
+                        "need %.2f GiB, free %.2f GiB "
+                        "(%.0fs elapsed, %.0fs remaining)",
+                        kv_cache_bytes / (1 << 30),
+                        free_bytes / (1 << 30),
+                        elapsed,
+                        remaining,
+                    )
+                    last_log = now
                 time.sleep(0.5)
                 free_bytes = torch.cuda.mem_get_info()[0]
             logger.info(

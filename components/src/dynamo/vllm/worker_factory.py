@@ -528,6 +528,7 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
+        # question: is this comprehensive across worker types/what happens on prefill workers where we also want this logic
         if config.gms_shadow_mode:
             # Shadow mode: lock-driven activation.
             # Flow: sleep → startup probe passes → block on lock → wake → register.

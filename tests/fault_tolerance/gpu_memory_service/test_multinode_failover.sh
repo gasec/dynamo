@@ -14,7 +14,8 @@ set -e
 
 MODEL_NAME="${1:-Qwen/Qwen3-0.6B}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+cd "$REPO_ROOT"
 
 VENV_NAME="${VENV_NAME:-dynamo}"
 source "${VENV_NAME}/bin/activate"

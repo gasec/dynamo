@@ -381,21 +381,9 @@ class BaseWorkerHandler(ABC):
         self.shutdown_event = shutdown_event
 
     async def sleep_engine(self, level: int = 1) -> None:
-        """Put the vLLM engine to sleep (GPU-only, no discovery changes).
-
-        Drains in-flight requests then sleeps the engine at the given level.
-        Callers that also need to manipulate discovery should use the ``sleep``
-        HTTP-route handler instead.
-        """
         await self._quiesce_controller.quiesce(level)
 
     async def wake_engine(self, tags=None) -> None:
-        """Wake the vLLM engine (GPU-only, no discovery changes).
-
-        Remaps weights / allocates KV cache and resumes the scheduler.
-        Callers that also need to manipulate discovery should use the
-        ``wake_up`` HTTP-route handler instead.
-        """
         await self._quiesce_controller.resume(tags)
 
     async def sleep(self, body: dict) -> dict:

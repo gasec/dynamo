@@ -2,10 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """GMS vLLM monkey-patches.
-
-These 3 patches remain as monkey-patches because their targets have no
-class injection point. Shadow mode method overrides live in model_runner.py
-(GMSModelRunner) and worker.py (GMSWorker).
 """
 
 from __future__ import annotations
@@ -29,7 +25,7 @@ _register_kv_caches_patched = False
 
 
 def patch_memory_snapshot() -> None:
-    """Add committed GMS bytes to MemorySnapshot.free_memory (RO mode only)."""
+    """Add committed GMS bytes to MemorySnapshot.free_memory"""
     global _memory_snapshot_patched
 
     if _memory_snapshot_patched:
@@ -73,7 +69,7 @@ def patch_memory_snapshot() -> None:
 
 
 # =============================================================================
-# Shadow mode monkey-patches (no class injection point available)
+# Shadow mode patches
 # =============================================================================
 
 

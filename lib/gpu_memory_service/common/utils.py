@@ -12,7 +12,6 @@ from gpu_memory_service.common.cuda_vmm_utils import (
     check_cuda_result,
     ensure_cuda_initialized,
 )
-from gpu_memory_service.common.types import RequestedLockType
 
 
 def get_socket_path(device: int) -> str:
@@ -37,19 +36,3 @@ def get_socket_path(device: int) -> str:
 
     gpu_uuid = f"GPU-{uuid.UUID(bytes=bytes(cu_uuid.bytes))}"
     return os.path.join(tempfile.gettempdir(), f"gms_{gpu_uuid}.sock")
-
-
-def get_weight_lock_type() -> RequestedLockType:
-    """Determine weight GMS lock type from ENGINE_ID.
-
-    ENGINE_ID=0 (default): RW_OR_RO — can load weights from disk or import
-        from an existing writer. Backward compatible with single-engine
-        deployments where ENGINE_ID is not set.
-    ENGINE_ID=1+: RO — import only, blocks until weights are committed.
-        Prevents TP>1 deadlocks by ensuring only engine-0 ever holds RW
-        locks across devices.
-    """
-    engine_id = int(os.environ.get("ENGINE_ID", "0"))
-    if engine_id == 0:
-        return RequestedLockType.RW_OR_RO
-    return RequestedLockType.RO
