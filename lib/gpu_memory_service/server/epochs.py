@@ -63,10 +63,10 @@ class GMSEpochManager:
     def _require_epoch(self, mode: GrantedLockType) -> Epoch:
         if mode == GrantedLockType.RW:
             if self._epochs.active_rw is None:
-                raise AssertionError("RW epoch is not active")
+                raise RuntimeError("RW epoch is not active")
             return self._epochs.active_rw
         if self._epochs.committed is None:
-            raise AssertionError("Committed epoch is not available")
+            raise RuntimeError("Committed epoch is not available")
         return self._epochs.committed
 
     def require_epoch_id(self, mode: GrantedLockType) -> int:
@@ -110,13 +110,13 @@ class GMSEpochManager:
         for key, entry in epoch.metadata.items():
             info = allocations_by_id.get(entry.allocation_id)
             if info is None:
-                raise AssertionError(
+                raise RuntimeError(
                     f"Metadata key {key!r} references missing allocation "
                     f"{entry.allocation_id!r} in epoch {epoch.id}"
                 )
 
             if entry.offset_bytes < 0 or entry.offset_bytes >= info.aligned_size:
-                raise AssertionError(
+                raise RuntimeError(
                     f"Metadata key {key!r} has invalid offset {entry.offset_bytes} "
                     f"for allocation {entry.allocation_id!r} "
                     f"(aligned_size={info.aligned_size})"
@@ -144,7 +144,7 @@ class GMSEpochManager:
 
     def on_rw_connect(self) -> int | None:
         if self._epochs.active_rw is not None:
-            raise AssertionError("RW epoch is already active")
+            raise RuntimeError("RW epoch is already active")
 
         old_epoch_id = None
         if self._epochs.committed is not None:
