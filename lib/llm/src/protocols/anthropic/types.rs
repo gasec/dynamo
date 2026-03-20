@@ -191,11 +191,7 @@ impl AnthropicCreateMessageRequest {
     /// The real Anthropic API sends `input_tokens` in `message_start`, so
     /// clients (e.g. Claude Code) expect a non-zero value there.
     pub fn estimate_input_tokens(&self) -> u32 {
-        estimate_message_tokens(
-            self.system.as_ref(),
-            &self.messages,
-            self.tools.as_deref(),
-        )
+        estimate_message_tokens(self.system.as_ref(), &self.messages, self.tools.as_deref())
     }
 }
 
@@ -1353,11 +1349,7 @@ pub struct AnthropicCountTokensResponse {
 impl AnthropicCountTokensRequest {
     /// Estimate input token count using a `len/3` heuristic.
     pub fn estimate_tokens(&self) -> u32 {
-        estimate_message_tokens(
-            self.system.as_ref(),
-            &self.messages,
-            self.tools.as_deref(),
-        )
+        estimate_message_tokens(self.system.as_ref(), &self.messages, self.tools.as_deref())
     }
 }
 
