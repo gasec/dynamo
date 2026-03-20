@@ -345,7 +345,7 @@ impl ConcurrentRadixTree {
 
         let mut needs_worker_insert = false;
 
-        let num_blocks_added = op.blocks.len();
+        let mut num_blocks_added = 0;
 
         // In each iteration, we lock the parent block and insert the worker into it from
         // the previous iteration. This avoids locking a block twice.
@@ -356,8 +356,8 @@ impl ConcurrentRadixTree {
                 // Insert worker into this node if it was the child from the
                 // previous iteration (skip for the initial parent, which is
                 // not one of the blocks being stored).
-                if needs_worker_insert {
-                    parent_guard.workers.insert(worker);
+                if needs_worker_insert && parent_guard.workers.insert(worker) {
+                    num_blocks_added += 1;
                 }
                 needs_worker_insert = true;
 
