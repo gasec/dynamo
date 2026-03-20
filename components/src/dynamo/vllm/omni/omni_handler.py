@@ -46,20 +46,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VIDEO_FPS = 16
 
-# TTS constants (matching vLLM-Omni serving_speech.py)
 # model_stage names that receive Qwen3-TTS-specific prompt format
 # (prompt_token_ids + additional_information). Other audio models
 # (MiMo-Audio, Qwen3-Omni, Stable Audio, etc.) use a plain text prompt.
 _TTS_MODEL_STAGES: set = {"qwen3_tts"}
-_TTS_LANGUAGES = {
-    "Auto", "Chinese", "English", "Japanese", "Korean",
-    "German", "French", "Russian", "Portuguese", "Spanish", "Italian",
-}
-_TTS_MAX_INSTRUCTIONS_LENGTH = 500
-_TTS_MAX_NEW_TOKENS_MIN = 1
-_TTS_MAX_NEW_TOKENS_MAX = 4096
-_REF_AUDIO_TIMEOUT_S = 15
-_REF_AUDIO_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 @dataclass
@@ -80,6 +70,7 @@ class EngineInputs:
     sampling_params_list: list | None = None
     request_type: RequestType = RequestType.CHAT_COMPLETION
     fps: int = 0
+    speed: float = 1.0
     response_format: str | None = None
 
 
@@ -194,16 +185,7 @@ class OmniHandler(BaseOmniHandler):
             )
         except (ValueError, NotImplementedError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
-            if request_type == RequestType.AUDIO_GENERATION:
-                yield NvAudioSpeechResponse(
-                    id=request_id,
-                    model=self.config.served_model_name or self.config.model,
-                    status="failed",
-                    created=int(time.time()),
-                    error=str(e),
-                ).model_dump()
-            else:
-                yield self._error_chunk(request_id, str(e))
+            yield self._error_chunk(request_id, str(e), request_type)
             return
 
         generate_kwargs: Dict[str, Any] = {
@@ -265,6 +247,7 @@ class OmniHandler(BaseOmniHandler):
                                 request_id,
                                 response_format=inputs.response_format,
                                 request_type=inputs.request_type,
+                                speed=inputs.speed,
                             )
                             if chunk:
                                 yield chunk
@@ -274,16 +257,7 @@ class OmniHandler(BaseOmniHandler):
                 raise
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
-                if inputs.request_type == RequestType.AUDIO_GENERATION:
-                    yield NvAudioSpeechResponse(
-                        id=request_id,
-                        model=self.config.served_model_name or self.config.model,
-                        status="failed",
-                        created=int(time.time()),
-                        error=str(e),
-                    ).model_dump()
-                else:
-                    yield self._error_chunk(request_id, str(e))
+                yield self._error_chunk(request_id, str(e), inputs.request_type)
 
     async def build_engine_inputs(
         self,
@@ -344,9 +318,9 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt
-            if nvext and nvext.negative_prompt
-            else None,
+            negative_prompt=(
+                nvext.negative_prompt if nvext and nvext.negative_prompt else None
+            ),
         )
 
         sp = OmniDiffusionSamplingParams(
@@ -399,9 +373,9 @@ class OmniHandler(BaseOmniHandler):
 
         prompt = OmniTextPrompt(
             prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt
-            if nvext and nvext.negative_prompt
-            else None,
+            negative_prompt=(
+                nvext.negative_prompt if nvext and nvext.negative_prompt else None
+            ),
         )
 
         if image is not None:
@@ -526,21 +500,18 @@ class OmniHandler(BaseOmniHandler):
 
         # Generic audio model – plain text prompt (same as image/video)
         prompt = OmniTextPrompt(prompt=req.input)
-        logger.info(
-            f"Audio request (generic): input='{req.input[:50]}...'"
-        )
+        logger.info(f"Audio request (generic): input='{req.input[:50]}...'")
         return EngineInputs(
             prompt=prompt,
             sampling_params_list=None,
             request_type=RequestType.AUDIO_GENERATION,
             response_format=req.response_format,
+            speed=req.speed or 1.0,
         )
 
     # -- Qwen3-TTS-specific helpers -------------------------------------------
 
-    async def _engine_inputs_tts(
-        self, req: NvCreateAudioSpeechRequest
-    ) -> EngineInputs:
+    async def _engine_inputs_tts(self, req: NvCreateAudioSpeechRequest) -> EngineInputs:
         """Build engine inputs for Qwen3-TTS models.
 
         Constructs the ``prompt_token_ids`` + ``additional_information``
@@ -599,6 +570,7 @@ class OmniHandler(BaseOmniHandler):
             sampling_params_list=None,
             request_type=RequestType.AUDIO_GENERATION,
             response_format=req.response_format,
+            speed=req.speed or 1.0,
         )
 
     def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
@@ -613,6 +585,13 @@ class OmniHandler(BaseOmniHandler):
         path – generic audio models skip this.
         """
         task_type = req.task_type or "CustomVoice"
+
+        _ALLOWED_TASK_TYPES = {"CustomVoice", "VoiceDesign", "Base"}
+        if task_type not in _ALLOWED_TASK_TYPES:
+            raise ValueError(
+                f"Invalid task_type '{task_type}'. "
+                f"Supported: {', '.join(sorted(_ALLOWED_TASK_TYPES))}"
+            )
 
         # Validate language against model config (dynamic) or fallback set
         if req.language is not None:
@@ -650,20 +629,20 @@ class OmniHandler(BaseOmniHandler):
 
         if (
             req.instructions
-            and len(req.instructions) > _TTS_MAX_INSTRUCTIONS_LENGTH
+            and len(req.instructions) > self.config.tts_max_instructions_length
         ):
             raise ValueError(
-                f"Instructions too long (max {_TTS_MAX_INSTRUCTIONS_LENGTH} characters)"
+                f"Instructions too long (max {self.config.tts_max_instructions_length} characters)"
             )
 
         if req.max_new_tokens is not None:
-            if req.max_new_tokens < _TTS_MAX_NEW_TOKENS_MIN:
+            if req.max_new_tokens < self.config.tts_max_new_tokens_min:
                 raise ValueError(
-                    f"max_new_tokens must be at least {_TTS_MAX_NEW_TOKENS_MIN}"
+                    f"max_new_tokens must be at least {self.config.tts_max_new_tokens_min}"
                 )
-            if req.max_new_tokens > _TTS_MAX_NEW_TOKENS_MAX:
+            if req.max_new_tokens > self.config.tts_max_new_tokens_max:
                 raise ValueError(
-                    f"max_new_tokens cannot exceed {_TTS_MAX_NEW_TOKENS_MAX}"
+                    f"max_new_tokens cannot exceed {self.config.tts_max_new_tokens_max}"
                 )
 
     async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple:
@@ -677,26 +656,51 @@ class OmniHandler(BaseOmniHandler):
         import soundfile as sf
 
         if ref_audio_str.startswith(("http://", "https://")):
+            import ipaddress
+            import socket
+            from urllib.parse import urlparse
+
             import aiohttp
+
+            # SSRF protection: block private/loopback networks
+            parsed = urlparse(ref_audio_str)
+            if not parsed.hostname:
+                raise ValueError("Invalid ref_audio URL")
+            for info in socket.getaddrinfo(
+                parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
+            ):
+                ip_str = str(info[4][0]).split("%", 1)[0]
+                addr = ipaddress.ip_address(ip_str)
+                if addr.is_private or addr.is_loopback:
+                    raise ValueError(
+                        f"ref_audio URL resolves to blocked address: {addr}"
+                    )
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     ref_audio_str,
-                    timeout=aiohttp.ClientTimeout(total=_REF_AUDIO_TIMEOUT_S),
+                    timeout=aiohttp.ClientTimeout(
+                        total=self.config.tts_ref_audio_timeout
+                    ),
                 ) as resp:
                     if resp.status != 200:
                         raise ValueError(
                             f"Failed to download ref_audio: HTTP {resp.status}"
                         )
                     audio_bytes = await resp.read()
-                    if len(audio_bytes) > _REF_AUDIO_MAX_BYTES:
+                    if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
                         raise ValueError(
                             f"ref_audio too large "
-                            f"({len(audio_bytes)} bytes, max {_REF_AUDIO_MAX_BYTES})"
+                            f"({len(audio_bytes)} bytes, max {self.config.tts_ref_audio_max_bytes})"
                         )
         elif ref_audio_str.startswith("data:"):
             _, encoded = ref_audio_str.split(",", 1)
             audio_bytes = base64.b64decode(encoded)
+            if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
+                raise ValueError(
+                    f"ref_audio data URI too large "
+                    f"({len(audio_bytes)} bytes, max {self.config.tts_ref_audio_max_bytes})"
+                )
         else:
             raise ValueError(
                 "ref_audio must be a URL (http/https) or base64 data URI (data:...)"
@@ -736,12 +740,16 @@ class OmniHandler(BaseOmniHandler):
                 tokenize_prompt=lambda t: self._tts_tokenizer(t, padding=False)[
                     "input_ids"
                 ],
-                codec_language_id=getattr(talker_config, "codec_language_id", None)
-                if talker_config
-                else None,
-                spk_is_dialect=getattr(talker_config, "spk_is_dialect", None)
-                if talker_config
-                else None,
+                codec_language_id=(
+                    getattr(talker_config, "codec_language_id", None)
+                    if talker_config
+                    else None
+                ),
+                spk_is_dialect=(
+                    getattr(talker_config, "spk_is_dialect", None)
+                    if talker_config
+                    else None
+                ),
             )
         except Exception as e:
             logger.warning(
@@ -749,9 +757,7 @@ class OmniHandler(BaseOmniHandler):
             )
             return 2048
 
-    def _extract_audio_tensor(
-        self, mm_output: Dict[str, Any]
-    ) -> tuple:
+    def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
         """Extract audio tensor and sample rate from multimodal_output dict.
 
         vLLM-Omni TTS models return audio in multimodal_output with keys
@@ -815,9 +821,7 @@ class OmniHandler(BaseOmniHandler):
 
                 audio_np = librosa.effects.time_stretch(y=audio_np, rate=speed)
             except ImportError:
-                logger.warning(
-                    "librosa not installed, ignoring speed adjustment"
-                )
+                logger.warning("librosa not installed, ignoring speed adjustment")
 
         fmt = (fmt or "wav").lower()
         format_map = {
@@ -862,7 +866,9 @@ class OmniHandler(BaseOmniHandler):
             Formatted response dict, or None if no audio.
         """
         if not mm_output:
-            return self._error_chunk(request_id, "No audio generated")
+            return self._error_chunk(
+                request_id, "No audio generated", RequestType.AUDIO_GENERATION
+            )
 
         try:
             start_time = time.time()
@@ -871,7 +877,11 @@ class OmniHandler(BaseOmniHandler):
             audio_np, sample_rate = self._extract_audio_tensor(mm_output)
 
             # Determine encoding format (url is a storage mode, not an audio format)
-            encode_fmt = "wav" if response_format in (None, "url", "b64_json") else response_format
+            encode_fmt = (
+                "wav"
+                if response_format in (None, "url", "b64_json")
+                else response_format
+            )
 
             # Encode audio with format and speed
             audio_bytes, media_type = await asyncio.to_thread(
@@ -1129,9 +1139,11 @@ class OmniHandler(BaseOmniHandler):
                         "role": "assistant",
                         "content": delta_text,
                     },
-                    "finish_reason": normalize_finish_reason(output.finish_reason)
-                    if output.finish_reason
-                    else None,
+                    "finish_reason": (
+                        normalize_finish_reason(output.finish_reason)
+                        if output.finish_reason
+                        else None
+                    ),
                 }
             ],
         }

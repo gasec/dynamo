@@ -2171,6 +2171,7 @@ async fn audio_speech(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    let response_format = request.response_format.clone();
     let request_id = get_or_create_request_id(request.user.as_deref(), &headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
@@ -2222,27 +2223,34 @@ async fn audio_speech(
             ErrorMessage::internal_server_error("Failed to fold audio stream")
         })?;
 
+    // Check for failure before marking success
+    if response.status == "failed" {
+        return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
+    }
+
     inflight.mark_ok();
 
     // If response contains b64_json audio data, decode and return as binary
     // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
-    if let Some(first) = response.data.first() {
-        if let Some(b64) = &first.b64_json {
-            if let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
-                // Determine content-type from response_format or default to wav
-                let content_type = "audio/wav";
-                return Ok(Response::builder()
-                    .header("content-type", content_type)
-                    .body(axum::body::Body::from(audio_bytes))
-                    .unwrap());
-            }
-        }
+    if let Some(first) = response.data.first()
+        && let Some(b64) = &first.b64_json
+        && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
+    {
+        let content_type = match response_format.as_deref().unwrap_or("wav") {
+            "mp3" => "audio/mpeg",
+            "flac" => "audio/flac",
+            "pcm" => "audio/pcm",
+            "aac" => "audio/aac",
+            "opus" => "audio/ogg; codecs=opus",
+            _ => "audio/wav",
+        };
+        return Ok(Response::builder()
+            .header("content-type", content_type)
+            .body(axum::body::Body::from(audio_bytes))
+            .unwrap());
     }
 
-    // Fallback: return JSON (error responses or url format)
-    if response.status == "failed" {
-        return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
-    }
+    // Fallback: return JSON (url format responses)
     Ok(Json(response).into_response())
 }
 
