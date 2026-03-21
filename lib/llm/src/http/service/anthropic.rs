@@ -430,9 +430,7 @@ async fn handler_count_tokens(
 // ---------------------------------------------------------------------------
 
 /// Build a lookup of model display_name -> context_length from model cards.
-fn build_model_context_map(
-    state: &service_v2::State,
-) -> std::collections::HashMap<String, u32> {
+fn build_model_context_map(state: &service_v2::State) -> std::collections::HashMap<String, u32> {
     state
         .manager()
         .get_model_cards()
