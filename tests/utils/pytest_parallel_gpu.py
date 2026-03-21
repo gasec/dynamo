@@ -136,10 +136,6 @@ def _get_gpu_used_gib(gpu_index: int = 0) -> float:
         return 0.0
 
 
-def _short_name(test_id: str) -> str:
-    return test_id.split("::", 1)[1] if "::" in test_id else test_id
-
-
 _RETRYABLE_INIT_MARKERS = [
     "Error in memory profiling",  # vLLM profiling race assertion
     "Free memory on device",  # not enough free VRAM at startup
@@ -199,7 +195,7 @@ def run_parallel(
         tests.append(
             {
                 "id": tid,
-                "name": _short_name(tid),
+                "name": tid,
                 "profiled_gib": m.get("profiled_vram_gib", max_vram_gib),
                 "requested_gib": m.get("requested_vram_gib"),
                 "timeout": m.get("timeout", 600),
@@ -216,7 +212,7 @@ def run_parallel(
         if nodeid not in test_id_set:
             profiled = m.get("profiled_vram_gib")
             if profiled is not None and profiled > max_vram_gib:
-                skipped.append((_short_name(nodeid), profiled))
+                skipped.append((nodeid, profiled))
 
     # Assign permanent worker IDs (w0, w1, ...) to each test
     for idx, test in enumerate(tests):
@@ -349,7 +345,7 @@ def run_parallel(
                         _print(f"{prefix} {line}")
 
                 status = "PASSED" if passed else "FAILED"
-                _print(f"[w{w_id}] {status} {test['name']} ({duration:.0f}s)")
+                _print(f"[w{w_id}] {test['name']} {status} [{duration:.0f}s]")
                 budget_used -= test["profiled_gib"]
                 completed.append(
                     {
@@ -438,39 +434,35 @@ def run_parallel(
     # Sort by w_id for consistent display
     completed.sort(key=lambda c: c["test"]["w_id"])
 
-    # Calculate column width from longest test name
-    max_name = max((len(c["test"]["name"]) for c in completed), default=30)
-    col_w = max_name + 8  # [wN] + padding
-
     _print()
-    _print(f"{'=' * (col_w + 50)}")
+    _print(f"{'=' * 30} short test summary info {'=' * 30}")
     for c in completed:
         t = c["test"]
         status = "PASSED" if c["passed"] else "FAILED"
         retries = t.get("retries", 0)
         retry_str = f" ({retries} retries)" if retries else ""
-        label = f"[w{t['w_id']}] {t['name']}"
-        prof = f"{t['profiled_gib']:>5.1f}"
-        req = (
-            f"{t['requested_gib']:>5.1f}" if t["requested_gib"] is not None else "    -"
-        )
         timeout = int(t["timeout"])
         _print(
-            f"{label:<{col_w}} {c['duration']:>4.0f}s/{timeout:<3}s  "
-            f"profiled={prof}  req={req} GiB  {status}{retry_str}"
+            f"{status} [w{t['w_id']}] {t['name']} "
+            f"[{c['duration']:.0f}s/{timeout}s]{retry_str}"
         )
-    _print(f"{'=' * (col_w + 50)}")
+
+    n_summary_parts = []
+    if n_failed:
+        n_summary_parts.append(f"{n_failed} failed")
+    n_summary_parts.append(f"{n_passed} passed")
 
     if len(completed) > 1 and sequential_time > 0:
         speedup = sequential_time / wall_time
-        saved = sequential_time - wall_time
-        _print(
-            f"{n_passed} passed, {n_failed} failed in {wall_time:.0f}s "
-            f"(vs {sequential_time:.0f}s sequential) "
-            f"-- {speedup:.1f}x speedup, saved {saved:.0f}s"
+        summary = ", ".join(n_summary_parts)
+        summary += (
+            f" in {wall_time:.0f}s (vs {sequential_time:.0f}s seq, {speedup:.1f}x)"
         )
     else:
-        _print(f"{n_passed} passed, {n_failed} failed in {wall_time:.0f}s")
+        summary = ", ".join(n_summary_parts) + f" in {wall_time:.0f}s"
+
+    pad = max(0, (84 - len(summary) - 2) // 2)
+    _print(f"{'=' * pad} {summary} {'=' * pad}")
 
     # Aggregate JUnit XMLs into a single file
     combined = _aggregate_junit_xml(_JUNIT_DIR)
