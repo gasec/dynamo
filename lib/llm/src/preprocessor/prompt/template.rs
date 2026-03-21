@@ -123,6 +123,9 @@ struct HfTokenizerConfigJsonFormatter {
     mixins: Arc<ContextMixins>,
     supports_add_generation_prompt: bool,
     requires_content_arrays: bool,
+    /// True if the chat template natively references `reasoning_content`.
+    /// When true, skip injection — the template handles it.
+    template_handles_reasoning: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter
