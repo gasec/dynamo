@@ -25,7 +25,6 @@ A 10-second cooldown between launches avoids the vLLM profiling race
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -350,32 +349,6 @@ def run_parallel(
                         _print(f"{prefix} {line}")
 
                 status = "PASSED" if passed else "FAILED"
-                # #region agent log
-                _actual_at_done = _get_gpu_used_gib(gpu_index)
-                _last_lines = info["captured"][-10:] if not passed else []
-                _debug_done = json.dumps(
-                    {
-                        "sessionId": "8dc0f8",
-                        "hypothesisId": "H1_H2_H3",
-                        "location": "pytest_parallel_gpu.py:done",
-                        "message": "done",
-                        "data": {
-                            "w_id": w_id,
-                            "test": test["name"],
-                            "passed": passed,
-                            "rc": rc,
-                            "duration_s": round(duration, 1),
-                            "actual_gpu_used_gib": round(_actual_at_done, 1),
-                            "budget_used_after": round(budget_used, 1),
-                            "retries": test.get("retries", 0),
-                            "error_tail": _last_lines,
-                        },
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                with open("/workspace/.cursor/debug-8dc0f8.log", "a") as _df:
-                    _df.write(_debug_done + "\n")
-                # #endregion
                 _print(f"[w{w_id}] {status} {test['name']} ({duration:.0f}s)")
                 budget_used -= test["profiled_gib"]
                 completed.append(
@@ -422,17 +395,14 @@ def run_parallel(
                     budget_used += test["profiled_gib"]
                     info = _launch_test(test, env_base)
                     running[w_id] = info
-                    free_gib = gpu_budget_gib - budget_used
                     retry_str = (
                         f" (retry {test.get('retries', 0)})"
                         if test.get("retries")
                         else ""
                     )
                     _print(
-                        f"[w{w_id}] {test['name']} "
-                        f"(profiled {test['profiled_gib']:.1f} GiB, "
-                        f"budget {free_gib:.1f} free, "
-                        f"actual {actual_free_gib:.1f} GiB free){retry_str}"
+                        f"[w{w_id}] RUNNING {test['name']} "
+                        f"(profiled {test['profiled_gib']:.1f} GiB){retry_str}"
                     )
                     last_launch_time = now
                     break

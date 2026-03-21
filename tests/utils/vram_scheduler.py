@@ -147,7 +147,6 @@ def print_gpu_plan(
     print(f"    -n N     : N concurrent slots across {len(gpus)} GPU(s)")
     print("\n  Usage:")
     print(
-        f"    python tests/utils/pytest_parallel_gpu.py "
-        f"--max-vram-gib={vram_limit:.0f} -n {auto_slots} "
-        f"<pytest args>"
+        f"    pytest --max-vram-gib={vram_limit:.0f} -n {auto_slots} "
+        f'-m "gpu_1 and vllm" tests/serve/'
     )

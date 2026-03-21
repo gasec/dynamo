@@ -65,7 +65,7 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(5.0),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(5.0),  # actual profiled peak
             pytest.mark.requested_vram_gib(3.0),  # engine allocation
             pytest.mark.timeout(
                 360
@@ -96,7 +96,7 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(5.0),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(5.0),  # actual profiled peak
             pytest.mark.requested_vram_gib(3.0),  # engine allocation
             pytest.mark.timeout(120),  # ~5x observed 24.3s; CI machines are slower
             pytest.mark.post_merge,
@@ -126,7 +126,7 @@ vllm_configs = {
         marks=[
             pytest.mark.lmcache,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(5.0),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(5.0),  # actual profiled peak
             pytest.mark.requested_vram_gib(3.0),  # engine allocation
             pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
@@ -150,7 +150,7 @@ vllm_configs = {
         marks=[
             pytest.mark.lmcache,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(5.0),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(5.0),  # actual profiled peak
             pytest.mark.requested_vram_gib(3.0),  # engine allocation
             pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
@@ -176,7 +176,7 @@ vllm_configs = {
         script_name="agg_request_planes.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(5.0),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(5.0),  # actual profiled peak
             pytest.mark.requested_vram_gib(3.0),  # engine allocation
             pytest.mark.timeout(
                 360
@@ -196,7 +196,7 @@ vllm_configs = {
         script_name="agg_request_planes.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(5.0),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(5.0),  # actual profiled peak
             pytest.mark.requested_vram_gib(3.0),  # engine allocation
             pytest.mark.timeout(
                 360
@@ -350,7 +350,7 @@ vllm_configs = {
         # post_merge because needs real NIXL not stub
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.3),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(9.3),  # actual profiled peak
             pytest.mark.requested_vram_gib(7.3),  # engine allocation
             pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
             pytest.mark.post_merge,
@@ -432,7 +432,7 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(19.6),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(19.6),  # actual profiled peak
             pytest.mark.requested_vram_gib(17.6),  # engine allocation
             pytest.mark.timeout(
                 360
@@ -467,7 +467,7 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(14.6),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(14.6),  # actual profiled peak
             pytest.mark.requested_vram_gib(12.6),  # engine allocation
             pytest.mark.timeout(
                 300
@@ -716,7 +716,7 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(16.6),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(16.6),  # actual profiled peak
             pytest.mark.requested_vram_gib(14.6),  # engine allocation
             pytest.mark.timeout(
                 420
@@ -756,7 +756,7 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(5.0),  # nvidia-smi peak at min fraction
+            pytest.mark.profiled_vram_gib(5.0),  # actual profiled peak
             pytest.mark.requested_vram_gib(3.0),  # engine allocation
             pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
             pytest.mark.pre_merge,
