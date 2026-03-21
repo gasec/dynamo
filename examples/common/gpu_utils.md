@@ -74,10 +74,7 @@ kv_cache_per_token = 2 * num_layers * num_kv_heads * head_dim * bytes_per_elemen
 
 kv_cache_total = kv_cache_per_token * max_model_len * max_concurrent_seqs
 
-overhead ≈ engine-dependent (auto-computed by estimate_worker_vram):
-           vllm:   1.2 + 1.0 * sqrt(params_b) GiB  (0.6B≈2.0, 8B≈4.0)
-           sglang: 1.5 + 1.0 * sqrt(params_b) GiB  (0.6B≈2.3, 8B≈4.3)
-           trtllm: 2.0 + 1.2 * sqrt(params_b) GiB  (0.6B≈2.9, 8B≈5.4)
+overhead ≈ 2-5 GiB (CUDA context, activations, framework buffers)
 ```
 
 Rule of thumb: set `gpu-memory-utilization` so that
@@ -232,8 +229,7 @@ engine_overhead ≈ 2.0 + 1.2 * sqrt(params_b) GiB  (CUDA context + TRT buffers 
 kv_cache = free_vram_after_model_load * free_gpu_memory_fraction
 ```
 
-Engine overhead is auto-computed by `estimate_worker_vram` when called with the
-`trtllm` engine name.  Examples: 0.6B → 2.9 GiB, 8B → 5.4 GiB, 30B → 8.6 GiB.
+Engine overhead varies by model size (roughly 2-6 GiB for 0.6B-30B models).
 
 ### Empirical validation (Qwen3-0.6B, RTX 6000 Ada 48 GiB, trtllm 1.3.0rc5)
 
@@ -272,13 +268,11 @@ to get 10 GiB of KV cache with a 5 GiB model.
 The helper functions in `gpu_utils.sh` handle these differences:
 - `gpu_gb_to_total_fraction`: for vLLM/sglang (fraction of total VRAM)
 - `gpu_gb_to_free_fraction`: for TensorRT-LLM (fraction of free VRAM)
-- `gpu_worker_fraction <engine> <total_gib> <kv_gib>`: converts estimated GiB
-  into the engine-appropriate fraction (total for vllm/sglang, free for trtllm).
 
-Launch scripts use `build_gpu_mem_args` which calls these internally:
+Launch scripts use `build_gpu_mem_args` which checks `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` first, then any user-provided flag, then returns empty (engine default):
 
 ```bash
-GPU_MEM_FRACTION=$(build_gpu_mem_args trtllm --model "$MODEL" --max-model-len "$SEQ_LEN" --max-num-seqs "$CONCURRENCY")
+GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL")
 ```
 
 ---
@@ -314,8 +308,7 @@ memory fraction a script needs.
 - Maps to `--gpu-memory-utilization` in vLLM and `--mem-fraction-static` in sglang.
 - For TensorRT-LLM, maps to `kv_cache_config.free_gpu_memory_fraction` via
   `--override-engine-args`.
-- Launch scripts use `build_gpu_mem_args` to compute the default fraction;
-  the override bypasses the estimator and splits the raw value between workers.
+- Launch scripts use `build_gpu_mem_args` which checks this variable first.
 - Scripts that use `--kv-cache-memory-bytes` (vLLM) bypass the fraction-based KV
   cache sizing, making the profiler's fraction override ineffective for KV cache.
   Those scripts should warn when `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` is set.

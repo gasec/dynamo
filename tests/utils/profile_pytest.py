@@ -19,7 +19,8 @@ In **binary-search mode** (the default), the profiler sets the env var
 re-runs the test at each midpoint.  If the test passes, the fraction is lowered;
 if it OOMs, the fraction is raised — standard bisection to find the minimum
 VRAM the test needs.  The peak ``memory.used`` from the last passing run
-(plus a 10 % safety margin) becomes the ``@pytest.mark.max_vram_gib`` recommendation.
+(plus a 10 % safety margin) becomes the ``@pytest.mark.profiled_vram_gib`` and
+``@pytest.mark.requested_vram_gib`` recommendations.
 
 **IMPORTANT**: The test under profile **MUST** honor ``_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE``
 — either directly (see ``test_mock_gpu_alloc.py``) or via launch scripts that
@@ -523,15 +524,25 @@ def _recommend_markers(
             )
         )
 
-    # -- Hardware: VRAM requirement --
+    # -- Hardware: VRAM requirements (two markers) --
     if used_vram > _PLATEAU_TOLERANCE_MIB:
+        max_peak_gib = round(max_peak_mib / 1024, 1)
         padded_peak_mib = int(max_peak_mib * _VRAM_SAFETY_FACTOR)
         padded_peak_gib = round(padded_peak_mib / 1024, 1)
+
+        # profiled_vram_gib: actual nvidia-smi peak (for scheduling/filtering)
         recs.append(
             MarkerRecommendation(
-                f"max_vram_gib({padded_peak_gib})",
-                f"peak {_format_mib(max_peak_mib)} GPU RAM used "
-                f"(+10% safety: {_format_mib(padded_peak_mib)})",
+                f"profiled_vram_gib({max_peak_gib})",
+                f"actual nvidia-smi peak {_format_mib(max_peak_mib)}",
+            )
+        )
+        # requested_vram_gib: engine allocation target (profiled - ~2 GiB CUDA overhead)
+        requested_gib = round(max(max_peak_gib - 2.0, 1.0), 1)
+        recs.append(
+            MarkerRecommendation(
+                f"requested_vram_gib({requested_gib})",
+                f"engine allocation ({max_peak_gib} - 2.0 GiB CUDA overhead)",
             )
         )
 
@@ -761,7 +772,7 @@ def _find_min_vram(
     elapsed_times.append(iter_elapsed)
     if rc != 0:
         print(
-            f"  [FAIL] allowed GPU = {hi * total_gib:.1f} GiB ({hi:.0%}), "
+            f"  [FAIL] requested GPU = {hi * total_gib:.1f} GiB ({hi:.0%}), "
             f"test fails even at max utilization. Cannot determine minimum."
         )
         return rc
@@ -774,8 +785,8 @@ def _find_min_vram(
     last_pass_samples = raw_samples
     pass_wall_times.append(wall)
     print(
-        f"  [PASS] allowed GPU = {hi * total_gib:.1f} GiB ({hi:.0%}), "
-        f"peak GPU used = {_format_mib(peak_mib)}, wall {wall:.0f}s, "
+        f"  [PASS] requested GPU = {hi * total_gib:.1f} GiB ({hi:.0%}), "
+        f"profiled peak GPU = {_format_mib(peak_mib)}, wall {wall:.0f}s, "
         f"iter took {iter_elapsed:.0f}s"
     )
 
@@ -861,14 +872,14 @@ def _find_min_vram(
             pass_wall_times.append(wall)
             hi = mid
             print(
-                f"  [PASS] allowed GPU = {mid * total_gib:.1f} GiB ({mid:.0%}), "
-                f"peak GPU used = {_format_mib(peak_mib)}, wall {wall:.0f}s, "
+                f"  [PASS] requested GPU = {mid * total_gib:.1f} GiB ({mid:.0%}), "
+                f"profiled peak GPU = {_format_mib(peak_mib)}, wall {wall:.0f}s, "
                 f"iter took {iter_elapsed:.0f}s"
             )
         else:
             lo = mid
             print(
-                f"  [FAIL] allowed GPU = {mid * total_gib:.1f} GiB ({mid:.0%}), "
+                f"  [FAIL] requested GPU = {mid * total_gib:.1f} GiB ({mid:.0%}), "
                 f"OOM or error, iter took {iter_elapsed:.0f}s"
             )
 
@@ -901,7 +912,6 @@ def _find_min_vram(
     min_vram_gib = last_pass_util * total_gib
 
     padded_peak_mib = int(last_pass_peak_mib * _VRAM_SAFETY_FACTOR)
-    padded_peak_gib = round(padded_peak_mib / 1024, 1)
 
     # Extract a short test name from pytest args for the summary
     test_name = next(
@@ -917,7 +927,10 @@ def _find_min_vram(
         f"(peak observed: {_format_mib(last_pass_peak_mib)}, "
         f"+10% safety: {_format_mib(padded_peak_mib)})"
     )
-    print(f"  {test_short}: @pytest.mark.max_vram_gib({padded_peak_gib})")
+    peak_gib = round(last_pass_peak_mib / 1024, 1)
+    requested_gib = round(max(peak_gib - 2.0, 1.0), 1)
+    print(f"  {test_short}: @pytest.mark.profiled_vram_gib({peak_gib})")
+    print(f"  {test_short}: @pytest.mark.requested_vram_gib({requested_gib})")
 
     # Full marker recommendations using average wall time across all passing runs
     if recommend:

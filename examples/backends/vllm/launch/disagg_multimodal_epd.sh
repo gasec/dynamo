@@ -83,16 +83,16 @@ DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
 DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
 
 # GPU memory utilization for workers.
-# NOTE: --kv-cache-memory-bytes (set below for P/D workers) overrides
-# --gpu-memory-utilization for KV cache sizing. Per vLLM CacheConfig:
-# "kv_cache_memory_bytes (when not-None) ignores gpu_memory_utilization"
-# Ref: https://docs.vllm.ai/en/stable/api/vllm/config/cache/
-# Therefore _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE has no effect on actual VRAM
-# usage when --kv-cache-memory-bytes is set.
-if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
-    echo "WARNING: _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE is set but has no effect here because" >&2
-    echo "  --kv-cache-memory-bytes overrides --gpu-memory-utilization in vLLM." >&2
-fi
+# TODO: Three changes needed for GPU-parallel test support:
+#   1. Honor _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE: when set, divide by 3 and apply
+#      to each worker's --gpu-memory-utilization. Without this, the hard-coded
+#      fractions (summing to 0.9) require near-exclusive GPU access and cannot
+#      run in parallel with other tests.
+#   2. Use build_gpu_mem_args (from gpu_utils.sh) instead of hard-coding fractions.
+#      build_gpu_mem_args already checks _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE.
+#   3. Don't hard-code VLLM_NIXL_SIDE_CHANNEL_PORT (20097/20098/20099) and ZMQ
+#      endpoint ports (20080/20081/20082) -- allocate dynamically or accept via
+#      env vars so multiple instances can coexist.
 DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}

@@ -229,7 +229,8 @@ def _validate_chat_response(response: requests.Response) -> Dict[str, Any]:
 
 
 # Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning_effort
-@pytest.mark.max_vram_gib(20.4)  # observed peak 18.5 GiB (+10% safety)
+@pytest.mark.profiled_vram_gib(20.4)  # actual nvidia-smi peak
+@pytest.mark.requested_vram_gib(18.5)  # engine allocation
 @pytest.mark.timeout(300)  # 3x observed ~70s wall time, rounded up
 @pytest.mark.post_merge
 def test_reasoning_effort(
@@ -297,7 +298,8 @@ def test_reasoning_effort(
 
 
 # Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling
-@pytest.mark.max_vram_gib(20.4)  # observed peak 18.5 GiB (+10% safety)
+@pytest.mark.profiled_vram_gib(20.4)  # actual nvidia-smi peak
+@pytest.mark.requested_vram_gib(18.5)  # engine allocation
 @pytest.mark.timeout(113)  # 3x observed 37.4s wall time
 @pytest.mark.post_merge
 def test_tool_calling(
@@ -341,7 +343,8 @@ def test_tool_calling(
 
 
 # Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_tool_calling_second_round
-@pytest.mark.max_vram_gib(20.4)  # observed peak 18.5 GiB (+10% safety)
+@pytest.mark.profiled_vram_gib(20.4)  # actual nvidia-smi peak
+@pytest.mark.requested_vram_gib(18.5)  # engine allocation
 @pytest.mark.timeout(115)  # 3x observed 38.1s wall time
 @pytest.mark.nightly
 def test_tool_calling_second_round(
@@ -407,7 +410,8 @@ def test_tool_calling_second_round(
 
 
 # Measured using: tests/utils/profile_pytest.py tests/frontend/test_vllm.py::test_reasoning
-@pytest.mark.max_vram_gib(20.4)  # observed peak 18.5 GiB (+10% safety)
+@pytest.mark.profiled_vram_gib(20.4)  # actual nvidia-smi peak
+@pytest.mark.requested_vram_gib(18.5)  # engine allocation
 @pytest.mark.timeout(131)  # 3x observed 43.4s wall time
 @pytest.mark.nightly
 def test_reasoning(request, start_services: ServicePorts, predownload_models) -> None:
