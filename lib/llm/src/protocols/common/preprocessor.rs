@@ -1,15 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use dynamo_kv_router::{
+    config::RouterConfigOverride,
+    protocols::{BlockExtraInfo, WorkerId},
+};
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RouterConfigOverride;
-use crate::kv_router::protocols::BlockExtraInfo;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -54,6 +57,15 @@ pub struct RoutingHints {
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+
+    /// TTL in seconds for cache control pinning. None = no pinning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_ttl: Option<u64>,
+
+    /// Worker IDs provided externally and not discovered by the router.
+    /// When set, only workers in this set are considered during scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -94,6 +106,8 @@ pub struct MmRoutingInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum MultimodalData {
     Url(url::Url),
+    #[serde(rename(serialize = "Url"))]
+    RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
 }
 
@@ -176,6 +190,11 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
+    /// Optional request timestamp in milliseconds forwarded from nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timestamp_ms: Option<f64>,
+
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]
     #[serde(skip)]
@@ -204,6 +223,19 @@ impl PreprocessedRequest {
     /// Get mutable access to routing hints, creating default if None
     pub fn routing_mut(&mut self) -> &mut RoutingHints {
         self.routing.get_or_insert_with(RoutingHints::default)
+    }
+
+    /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
+    /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
+    pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
+        let Some(mm) = self.mm_routing_info.as_ref() else {
+            return (&self.token_ids, None);
+        };
+        let tokens = mm.routing_token_ids.as_slice();
+        if tokens.is_empty() {
+            return (&self.token_ids, None);
+        }
+        (tokens, Some(mm.block_mm_infos.as_slice()))
     }
 }
 

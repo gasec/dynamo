@@ -1,7 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
+use super::{AsyncEngineContextProvider, ResponseStream};
+use crate::error::{BackendError, ErrorType, match_error_chain};
+
+/// Check if an error chain indicates the worker should be reported as down.
+fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
+    const INHIBITED: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    match_error_chain(err, INHIBITED, &[])
+}
 use crate::{
     component::{Client, Endpoint},
     engine::{AsyncEngine, Data},
@@ -11,9 +23,6 @@ use crate::{
     },
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
-};
-use async_nats::client::{
-    RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
 };
 use async_trait::async_trait;
 use rand::Rng;
@@ -240,7 +249,8 @@ where
 
     /// Select the next worker according to the routing mode.
     /// Increments round-robin counter if applicable.
-    /// Panics if called on Direct or KV mode - those have their own selection mechanisms.
+    /// Returns None for Direct mode - requires explicit worker IDs via routing hints
+    /// Panics for KV mode which has its own selection via find_best_match.
     pub fn select_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -257,6 +267,7 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
+            RouterMode::Direct => None,
             _ => {
                 panic!(
                     "select_next_worker should not be called for {:?} routing mode",
@@ -268,6 +279,7 @@ where
 
     /// Peek the next worker according to the routing mode without incrementing the counter.
     /// Useful for checking if a worker is suitable before committing to it.
+    /// Returns None for Direct mode - requires explicit worker IDs via routing hints.
     pub fn peek_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -287,6 +299,7 @@ where
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
+            RouterMode::Direct => None,
             _ => {
                 panic!(
                     "peek_next_worker should not be called for {:?} routing mode",
@@ -399,12 +412,12 @@ where
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
                 let stream = stream.map(move |res| {
-                    // TODO: Standardize error type to avoid using string matching DIS-364
+                    // Check if the error is migratable (indicates worker/connection failure)
                     if let Some(err) = res.err()
-                        && format!("{:?}", err) == STREAM_ERR_MSG
+                        && is_inhibited(&err)
                     {
                         tracing::debug!(
-                            "Reporting instance {instance_id} down due to stream error: {err}"
+                            "Reporting instance {instance_id} down due to migratable error: {err}"
                         );
                         client.report_instance_down(instance_id);
                     }
@@ -413,13 +426,8 @@ where
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }
             Err(err) => {
-                if self.fault_detection_enabled
-                    && let Some(req_err) = err.downcast_ref::<NatsRequestError>()
-                    && matches!(req_err.kind(), NatsNoResponders)
-                {
-                    tracing::debug!(
-                        "Reporting instance {instance_id} down due to request error: {req_err}"
-                    );
+                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
+                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
                     self.client.report_instance_down(instance_id);
                 }
                 Err(err)

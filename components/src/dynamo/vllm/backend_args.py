@@ -3,13 +3,15 @@
 
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
-from typing import Optional
+import warnings
+from typing import Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
+from .constants import DisaggregationMode, EmbeddingTransferMode
 
 
 class DynamoVllmArgGroup(ArgGroup):
@@ -25,12 +27,23 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         g = parser.add_argument_group("Dynamo vLLM Options")
 
+        add_argument(
+            g,
+            flag_name="--disaggregation-mode",
+            env_var="DYN_VLLM_DISAGGREGATION_MODE",
+            default=None,
+            help="Worker disaggregation mode: 'agg' (default, aggregated), "
+            "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
+            choices=[m.value for m in DisaggregationMode],
+        )
+
         add_negatable_bool_argument(
             g,
             flag_name="--is-prefill-worker",
             env_var="DYN_VLLM_IS_PREFILL_WORKER",
             default=False,
-            help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
+            help="DEPRECATED: use --disaggregation-mode=prefill. "
+            "Enable prefill functionality for this worker.",
         )
 
         add_negatable_bool_argument(
@@ -38,7 +51,8 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--is-decode-worker",
             env_var="DYN_VLLM_IS_DECODE_WORKER",
             default=False,
-            help="Mark this as a decode worker which does not publish KV events",
+            help="DEPRECATED: use --disaggregation-mode=decode. "
+            "Mark this as a decode worker which does not publish KV events.",
         )
 
         add_negatable_bool_argument(
@@ -47,16 +61,6 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_USE_TOKENIZER",
             default=False,
             help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
-        )
-
-        add_argument(
-            g,
-            flag_name="--sleep-mode-level",
-            env_var="DYN_VLLM_SLEEP_MODE_LEVEL",
-            default=1,
-            help="Sleep mode level (1=offload to CPU, 2=discard weights, 3=discard all).",
-            choices=[1, 2, 3],
-            arg_type=int,
         )
 
         # Multimodal
@@ -87,13 +91,6 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_MULTIMODAL_DECODE_WORKER",
             default=False,
             help="Run as multimodal decode worker in disaggregated mode.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--multimodal-encode-prefill-worker",
-            env_var="DYN_VLLM_MULTIMODAL_ENCODE_PREFILL_WORKER",
-            default=False,
-            help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4).",
         )
         add_negatable_bool_argument(
             g,
@@ -129,20 +126,25 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
-        # vLLM-Omni
-        add_negatable_bool_argument(
-            g,
-            flag_name="--omni",
-            env_var="DYN_VLLM_OMNI",
-            default=False,
-            help="Run as vLLM-Omni worker for multi-stage pipelines (supports text-to-text, text-to-image, etc.).",
-        )
         add_argument(
             g,
-            flag_name="--stage-configs-path",
-            env_var="DYN_VLLM_STAGE_CONFIGS_PATH",
-            default=None,
-            help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
+            flag_name="--embedding-transfer-mode",
+            env_var="DYN_VLLM_EMBEDDING_TRANSFER_MODE",
+            default=EmbeddingTransferMode.NIXL_WRITE.value,
+            help="Worker embedding transfer mode: 'local' (default, local file system), "
+            "'nixl-write' (NIXL transfer with WRITE), or 'nixl-read' (NIXL transfer with READ).",
+            choices=[m.value for m in EmbeddingTransferMode],
+        )
+
+        # Headless mode for multi-node TP/PP
+        add_negatable_bool_argument(
+            g,
+            flag_name="--headless",
+            env_var="DYN_VLLM_HEADLESS",
+            default=False,
+            help="Run in headless mode for multi-node TP/PP. "
+            "Secondary nodes run vLLM workers only, no dynamo endpoints. "
+            "See vLLM multi-node data parallel documentation for more details.",
         )
 
         # ModelExpress P2P
@@ -160,41 +162,97 @@ class DynamoVllmArgGroup(ArgGroup):
 class DynamoVllmConfig(ConfigBase):
     """Configuration for Dynamo vLLM wrapper (vLLM-specific only). All fields optional."""
 
+    disaggregation_mode: Union[
+        None, str, DisaggregationMode
+    ]  # None when not provided; resolved to enum in validate()
     is_prefill_worker: bool
     is_decode_worker: bool
     use_vllm_tokenizer: bool
-    sleep_mode_level: int
 
     # Multimodal
     route_to_encoder: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
     multimodal_decode_worker: bool
-    multimodal_encode_prefill_worker: bool
     enable_multimodal: bool
     mm_prompt_template: str
     frontend_decoding: bool
+    embedding_transfer_mode: Union[
+        str, EmbeddingTransferMode
+    ]  # resolved to enum in validate()
 
-    # vLLM-Omni
-    omni: bool
-    stage_configs_path: Optional[str] = None
+    # Headless mode for multi-node TP/PP
+    headless: bool = False
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
-        self._validate_prefill_decode_exclusive()
+        self._resolve_disaggregation_mode()
+        self._resolve_embedding_transfer_mode()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
-        self._validate_omni_stage_config()
 
-    def _validate_prefill_decode_exclusive(self) -> None:
-        """Ensure at most one of is_prefill_worker and is_decode_worker is set."""
-        if self.is_prefill_worker and self.is_decode_worker:
-            raise ValueError(
-                "Cannot set both --is-prefill-worker and --is-decode-worker"
+    def _resolve_embedding_transfer_mode(self) -> None:
+        """Resolve embedding_transfer_mode from string to enum."""
+        if isinstance(self.embedding_transfer_mode, str):
+            self.embedding_transfer_mode = EmbeddingTransferMode(
+                self.embedding_transfer_mode
             )
+
+    def _resolve_disaggregation_mode(self) -> None:
+        """Resolve disaggregation_mode from new enum or legacy boolean flags.
+
+        Priority:
+        1. If --disaggregation-mode was explicitly provided, use it.
+           Raise if legacy booleans are also set.
+        2. If legacy --is-prefill-worker or --is-decode-worker is set,
+           emit DeprecationWarning and translate to enum.
+        3. Apply default (AGGREGATED) if nothing was provided.
+        4. Sync boolean fields from the resolved enum value.
+        """
+        # Convert string to enum (non-None means explicitly provided)
+        explicit_mode = self.disaggregation_mode is not None
+        if isinstance(self.disaggregation_mode, str):
+            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+
+        # Check for legacy boolean flags
+        has_legacy = self.is_prefill_worker or self.is_decode_worker
+
+        if has_legacy and explicit_mode:
+            raise ValueError(
+                "Cannot combine --is-prefill-worker/--is-decode-worker with "
+                "--disaggregation-mode. Use only --disaggregation-mode."
+            )
+
+        if has_legacy:
+            if self.is_prefill_worker and self.is_decode_worker:
+                raise ValueError(
+                    "Cannot set both --is-prefill-worker and --is-decode-worker"
+                )
+            if self.is_prefill_worker:
+                warnings.warn(
+                    "--is-prefill-worker is deprecated, use --disaggregation-mode=prefill",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                self.disaggregation_mode = DisaggregationMode.PREFILL
+            elif self.is_decode_worker:
+                warnings.warn(
+                    "--is-decode-worker is deprecated, use --disaggregation-mode=decode",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                self.disaggregation_mode = DisaggregationMode.DECODE
+
+        # Apply default if neither new flag nor legacy flags were provided
+        if self.disaggregation_mode is None:
+            self.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        # Sync booleans from enum (canonical source of truth)
+        self.is_prefill_worker = self.disaggregation_mode == DisaggregationMode.PREFILL
+        self.is_decode_worker = self.disaggregation_mode == DisaggregationMode.DECODE
 
     def _count_multimodal_roles(self) -> int:
         """Return the number of multimodal worker roles set (0 or 1 allowed).
@@ -206,7 +264,6 @@ class DynamoVllmConfig(ConfigBase):
                 bool(self.multimodal_encode_worker),
                 bool(self.multimodal_worker),
                 bool(self.multimodal_decode_worker),
-                bool(self.multimodal_encode_prefill_worker),
             ]
         )
 
@@ -215,7 +272,7 @@ class DynamoVllmConfig(ConfigBase):
         if self._count_multimodal_roles() > 1:
             raise ValueError(
                 "Use only one of --multimodal-encode-worker, --multimodal-worker, "
-                "--multimodal-decode-worker, --multimodal-encode-prefill-worker"
+                "--multimodal-decode-worker"
             )
 
     def _validate_multimodal_requires_flag(self) -> None:
@@ -223,12 +280,4 @@ class DynamoVllmConfig(ConfigBase):
         if self._count_multimodal_roles() == 1 and not self.enable_multimodal:
             raise ValueError(
                 "Use --enable-multimodal when enabling any multimodal component"
-            )
-
-    def _validate_omni_stage_config(self) -> None:
-        """Require stage_configs_path when using --omni."""
-        if self.stage_configs_path and not self.omni:
-            raise ValueError(
-                "--stage-configs-path is only allowed when using --omni. "
-                "Specify a YAML file containing stage configurations for the multi-stage pipeline."
             )

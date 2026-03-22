@@ -44,8 +44,26 @@ const (
 	ComponentKindLeaderWorkerSet ComponentKind = "LeaderWorkerSet"
 )
 
+// +kubebuilder:validation:Enum=initializing;pending;successful;failed
+type DGDState string
+
+const (
+	DGDStateInitializing DGDState = "initializing"
+	DGDStatePending      DGDState = "pending"
+	DGDStateSuccessful   DGDState = "successful"
+	DGDStateFailed       DGDState = "failed"
+)
+
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 type DynamoGraphDeploymentSpec struct {
+	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+	// Service-level annotations take precedence over these values.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+	// Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
+	// Service-level labels take precedence over these values.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
@@ -66,6 +84,13 @@ type DynamoGraphDeploymentSpec struct {
 	// Restart specifies the restart policy for the graph deployment.
 	// +kubebuilder:validation:Optional
 	Restart *Restart `json:"restart,omitempty"`
+
+	// TopologyConstraint is the deployment-level topology constraint.
+	// When set, topologyProfile is required and names the ClusterTopology CR to use.
+	// packDomain is optional here — it can be omitted when only services carry constraints.
+	// Services without their own topologyConstraint inherit from this value.
+	// +optional
+	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
 }
 
 type Restart struct {
@@ -100,8 +125,12 @@ const (
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 type DynamoGraphDeploymentStatus struct {
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// State is a high-level textual status of the graph deployment lifecycle.
-	State string `json:"state,omitempty"`
+	// +kubebuilder:default=initializing
+	State DGDState `json:"state"`
 	// Conditions contains the latest observed conditions of the graph deployment.
 	// The slice is merged by type on patch updates.
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
@@ -130,7 +159,7 @@ type ServiceCheckpointStatus struct {
 	// IdentityHash is the computed hash of the checkpoint identity
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-	// Ready indicates if the checkpoint is ready for use
+	// Ready indicates if the checkpoint was visible to the worker at startup
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }
@@ -251,16 +280,13 @@ type DynamoGraphDeployment struct {
 	Status DynamoGraphDeploymentStatus `json:"status,omitempty"`
 }
 
-func (s *DynamoGraphDeployment) SetState(state string) {
+func (s *DynamoGraphDeployment) SetState(state DGDState) {
 	s.Status.State = state
 }
 
 // GetState returns the current lifecycle state
 func (d *DynamoGraphDeployment) GetState() string {
-	if d.Status.State == "" {
-		return consts.ResourceStateUnknown
-	}
-	return d.Status.State
+	return string(d.Status.State)
 }
 
 // +kubebuilder:object:root=true
@@ -298,6 +324,19 @@ func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
 	}
 	// If no matching condition found, append the new one
 	s.Status.Conditions = append(s.Status.Conditions, condition)
+}
+
+// HasAnyTopologyConstraint reports whether any topology constraint is set at any level.
+func (s *DynamoGraphDeployment) HasAnyTopologyConstraint() bool {
+	if s.Spec.TopologyConstraint != nil {
+		return true
+	}
+	for _, svc := range s.Spec.Services {
+		if svc != nil && svc.TopologyConstraint != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // HasAnyMultinodeService reports whether any service in the graph is configured with more than one node.
